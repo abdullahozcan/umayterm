@@ -1,0 +1,28 @@
+[package]
+name = "umayterm"
+version = "0.18.0"
+description = "UmayTerm - modern SSH terminal client"
+authors = ["opade"]
+edition = "2021"
+
+[lib]
+name = "umayterm_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+portable-pty = "0.9"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "time"] }
+russh = { version = "0.57", default-features = false, features = ["ring"] }
+russh-sftp = "2.4.0"
+rusqlite = { version = "0.32", features = ["bundled"] }
+keyring = { version = "4", default-features = false, features = ["v1", "zbus-secret-service-keyring-store"] }
+hex = "0.4"
+base64 = "0.22"
+argon2 = "0.5"
+log = "0.4"
