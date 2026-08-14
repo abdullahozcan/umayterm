@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { check as checkForUpdate, Update } from "@tauri-apps/plugin-updater";
 import { DEFAULT_THEME_ID, THEMES, getThemeConfig } from "./themes";
 import type {
   HostKeyPromptPayload,
@@ -48,6 +49,16 @@ export interface AppSettings {
   confirmMultilinePaste: boolean;
 }
 
+let toastTimer: ReturnType<typeof setTimeout> | null = null;
+
+function showToast(message: string) {
+  useSessionStore.setState({ toast: message });
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    useSessionStore.setState({ toast: null });
+  }, 5000);
+}
+
 const DEFAULT_SETTINGS: AppSettings = {
   fontFamily: '"JetBrains Mono", "Fira Code", monospace',
   fontSize: 13,
@@ -90,6 +101,7 @@ interface SessionStore {
   connectOpen: boolean;
   snippetOpen: boolean;
   pendingHostKey: PendingHostKey | null;
+  editingHost: HostRecord | null;
   hosts: HostRecord[];
   snippets: Snippet[];
   connectingIds: number[];
@@ -106,9 +118,14 @@ interface SessionStore {
   locked: boolean;
   lockEnabled: boolean;
   broadcastOpen: boolean;
+  updateAvailable: Update | null;
+  updateChecking: boolean;
+  toast: string | null;
+  clearToast: () => void;
   activate: (id: number) => void;
   focusSession: (id: number) => void;
-  openLocal: (color?: string | null) => void;
+  duplicateTab: (id: number) => void;
+  openLocal: (color?: string | null, cwd?: string | null) => void;
   openSsh: (
     params: Omit<SshConnectParams, "session_id" | "cols" | "rows">,
     color?: string | null,
@@ -140,6 +157,8 @@ interface SessionStore {
   closeTunnel: (id: number) => Promise<void>;
   setConnectOpen: (open: boolean) => void;
   setSnippetOpen: (open: boolean) => void;
+  startEditHost: (host: HostRecord) => void;
+  clearEditHost: () => void;
   setPendingHostKey: (key: PendingHostKey | null) => void;
   confirmHostKey: () => void;
   rejectHostKey: () => void;
@@ -165,6 +184,8 @@ interface SessionStore {
   lockClear: (current: string) => Promise<void>;
   setBroadcastOpen: (open: boolean) => void;
   broadcastSend: (text: string) => number;
+  checkForUpdates: () => Promise<void>;
+  downloadAndInstall: () => Promise<void>;
 }
 
 let hostKeyListener: Promise<() => void> | null = null;
@@ -208,6 +229,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   connectOpen: false,
   snippetOpen: false,
   pendingHostKey: null,
+  editingHost: null,
   hosts: [],
   snippets: [],
   connectingIds: [],
@@ -224,18 +246,23 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   locked: false,
   lockEnabled: false,
   broadcastOpen: false,
+  updateAvailable: null,
+  updateChecking: false,
+  toast: null,
+  clearToast: () => set({ toast: null }),
 
   activate: (id) => set({ activeId: id, visibleIds: [id] }),
 
   focusSession: (id) => set({ activeId: id }),
 
-  openLocal: (color) => {
+  openLocal: (color, cwd) => {
     const id = genId();
     const session: Session = {
       id,
       title: `zsh (${nextTabId++})`,
       kind: "local",
       color: color ?? null,
+      cwd: cwd ?? null,
     };
     set((s) => ({
       sessions: [...s.sessions, session],
@@ -271,6 +298,11 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   close: (id) => {
     invoke("close_pty", { id }).catch(() => {});
     invoke("ssh_close", { id }).catch(() => {});
+    const pending = get().pendingHostKey;
+    if (pending?.id === id) {
+      invoke("ssh_reject_host_key", { sessionId: id }).catch(() => {});
+      set({ pendingHostKey: null });
+    }
     set((s) => {
       const sessions = s.sessions.filter((x) => x.id !== id);
       const visibleIds = s.visibleIds.filter((x) => x !== id);
@@ -296,6 +328,17 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     if (!session || session.kind !== "ssh" || !session.params) return;
     invoke("ssh_connect", { params: session.params }).catch(() => {});
     get().setConnecting(true, id);
+  },
+
+  duplicateTab: (id) => {
+    const session = get().sessions.find((s) => s.id === id);
+    if (!session) return;
+    if (session.kind === "local") {
+      get().openLocal(session.color, session.cwd);
+    } else if (session.params) {
+      const { session_id: _sid, cols: _c, rows: _r, ...rest } = session.params;
+      get().openSsh(rest, session.color);
+    }
   },
 
   markDead: (id) => {
@@ -426,22 +469,22 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       listenPort,
       targetHost,
       targetPort,
-    }).catch((e) => {
-      console.error("Tünel açılamadı:", e);
     });
     await get().loadTunnels();
   },
 
   closeTunnel: async (id) => {
-    await invoke("tunnel_close", { id }).catch((e) => {
-      console.error("Tünel kapatılamadı:", e);
-    });
+    await invoke("tunnel_close", { id });
     await get().loadTunnels();
   },
 
   setConnectOpen: (open) => set({ connectOpen: open }),
 
   setSnippetOpen: (open) => set({ snippetOpen: open }),
+
+  startEditHost: (host) => set({ editingHost: host, connectOpen: true }),
+
+  clearEditHost: () => set({ editingHost: null }),
 
   setPendingHostKey: (key) => set({ pendingHostKey: key }),
 
@@ -474,12 +517,20 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   },
 
   saveHost: async (host) => {
-    await invoke<number>("host_save", { host }).catch(() => {});
+    try {
+      await invoke<number>("host_save", { host });
+    } catch (e) {
+      showToast(String(e));
+    }
     await get().loadHosts();
   },
 
   deleteHost: async (id) => {
-    await invoke("host_delete", { id }).catch(() => {});
+    try {
+      await invoke("host_delete", { id });
+    } catch (e) {
+      showToast(String(e));
+    }
     await get().loadHosts();
   },
 
@@ -519,12 +570,22 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
             method: "password" as const,
             password: host.password ?? "",
           };
+    const jump =
+      host.jumpHost && host.jumpUser
+        ? {
+            host: host.jumpHost,
+            port: host.jumpPort ?? 22,
+            username: host.jumpUser,
+            auth: { method: "password" as const, password: host.jumpPassword ?? "" },
+          }
+        : null;
     get().openSsh(
       {
         host: host.host,
         port: host.port,
         username: host.username,
         auth,
+        jump,
       },
       color,
     );
@@ -631,6 +692,30 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       sent++;
     }
     return sent;
+  },
+
+  checkForUpdates: async () => {
+    if (get().updateChecking) return;
+    set({ updateChecking: true, updateAvailable: null });
+    try {
+      const update = await checkForUpdate();
+      set({ updateAvailable: update });
+    } catch {
+      set({ updateAvailable: null });
+    } finally {
+      set({ updateChecking: false });
+    }
+  },
+
+  downloadAndInstall: async () => {
+    const update = get().updateAvailable;
+    if (!update) return;
+    set({ updateChecking: true });
+    try {
+      await update.downloadAndInstall();
+    } finally {
+      set({ updateChecking: false });
+    }
   },
 }));
 

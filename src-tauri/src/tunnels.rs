@@ -32,6 +32,7 @@ pub struct TunnelManager {
 
 struct TunnelRecord {
     info: Arc<TunnelInfo>,
+    session_id: u32,
     handle: JoinHandle<()>,
     stopped: Arc<AtomicBool>,
 }
@@ -197,11 +198,29 @@ pub async fn tunnel_open(
         id,
         TunnelRecord {
             info: info.clone(),
+            session_id: ssh_session_id,
             handle,
             stopped,
         },
     );
     Ok((*info).clone())
+}
+
+pub(crate) fn close_tunnels_for_session(tunnels: &TunnelManager, session_id: u32) {
+    let to_close: Vec<u32> = {
+        let guard = tunnels.tunnels.lock().unwrap();
+        guard
+            .iter()
+            .filter(|(_, t)| t.session_id == session_id)
+            .map(|(id, _)| *id)
+            .collect()
+    };
+    for id in to_close {
+        if let Some(record) = tunnels.tunnels.lock().unwrap().remove(&id) {
+            record.stopped.store(true, Ordering::SeqCst);
+            record.handle.abort();
+        }
+    }
 }
 
 #[tauri::command]

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,12 +17,14 @@ const KEEPALIVE_MAX: usize = 3;
 pub struct SshManager {
     pub sessions: Mutex<HashMap<u32, Arc<SshSession>>>,
     accepted_host_keys: Mutex<HashMap<u32, Vec<String>>>,
+    cancelled: Mutex<HashSet<u32>>,
 }
 
 pub(crate) struct SshSession {
     pub(crate) handle: client::Handle<SshHandler>,
     pub(crate) channel: tokio::sync::Mutex<ChannelWriteHalf<client::Msg>>,
     pub(crate) out: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    pub(crate) proxy: Option<client::Handle<SshHandler>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -58,9 +60,19 @@ pub struct SshConnectParams {
     pub cols: u32,
     pub rows: u32,
     pub auth: SshAuth,
+    pub jump: Option<JumpParams>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct JumpParams {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub auth: SshAuth,
+}
+
+#[derive(Deserialize, Clone)]
 #[serde(tag = "method", rename_all = "lowercase")]
 pub enum SshAuth {
     Password { password: String },
@@ -86,6 +98,9 @@ impl SshHandler {
             if sessions.remove(&self.session_id).is_some() {
                 eprintln!("[ssh] oturum temizlendi (session {})", self.session_id);
             }
+        }
+        if let Some(tunnels) = self.app.try_state::<Arc<crate::tunnels::TunnelManager>>() {
+            crate::tunnels::close_tunnels_for_session(tunnels.inner(), self.session_id);
         }
     }
 }
@@ -222,72 +237,41 @@ fn load_key(path: &str, passphrase: Option<&str>) -> Result<PrivateKey, String> 
     }
 }
 
-async fn connect_inner(
-    app: AppHandle,
-    params: &SshConnectParams,
-) -> Result<
-    (
-        client::Handle<SshHandler>,
-        ChannelWriteHalf<client::Msg>,
-        Arc<Mutex<VecDeque<Vec<u8>>>>,
-    ),
-    String,
-> {
-    let keepalive_secs = app
-        .try_state::<crate::store::Store>()
-        .and_then(|store| {
-            store
-                .conn
-                .lock()
-                .ok()
-                .and_then(|conn| crate::store::settings_get(&conn, "keepaliveSecs"))
-        })
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(KEEPALIVE_INTERVAL_SECS);
-    let config = Arc::new(client::Config {
-        channel_buffer_size: 1024,
-        keepalive_interval: Some(Duration::from_secs(keepalive_secs)),
-        keepalive_max: KEEPALIVE_MAX,
-        ..Default::default()
-    });
-    let out = Arc::new(Mutex::new(VecDeque::new()));
-    let handler = SshHandler {
-        app,
-        session_id: params.session_id,
-        host: params.host.clone(),
-        port: params.port,
-        out: out.clone(),
-    };
-    let mut session = client::connect(config, (params.host.as_str(), params.port), handler)
-        .await
-        .map_err(|e| format!("Bağlantı kurulamadı: {e}"))?;
-
-    let auth_result = match &params.auth {
-        SshAuth::Password { password } => session
-            .authenticate_password(&params.username, password)
+async fn rsa_hash_for(
+    session: &client::Handle<SshHandler>,
+    algorithm: russh::keys::Algorithm,
+) -> Result<Option<russh::keys::HashAlg>, String> {
+    if matches!(algorithm, russh::keys::Algorithm::Rsa { .. }) {
+        Ok(session
+            .best_supported_rsa_hash()
             .await
-            .map_err(|e| format!("Kimlik doğrulama hatası: {e}"))?,
+            .map_err(|e| format!("RSA karması: {e}"))?
+            .flatten())
+    } else {
+        Ok(None)
+    }
+}
+
+async fn authenticate(
+    session: &mut client::Handle<SshHandler>,
+    username: &str,
+    auth: &SshAuth,
+) -> Result<client::AuthResult, String> {
+    match auth {
+        SshAuth::Password { password } => session
+            .authenticate_password(username, password)
+            .await
+            .map_err(|e| format!("Kimlik doğrulama hatası: {e}")),
         SshAuth::Key {
             key_path,
             passphrase,
         } => {
             let key = load_key(key_path, passphrase.as_deref())?;
-let hash = if matches!(key.algorithm(), russh::keys::Algorithm::Rsa { .. }) {
-                session
-                    .best_supported_rsa_hash()
-                    .await
-                    .map_err(|e| format!("RSA karması: {e}"))?
-                    .flatten()
-            } else {
-                None
-            };
+            let hash = rsa_hash_for(session, key.algorithm()).await?;
             session
-                .authenticate_publickey(
-                    &params.username,
-                    PrivateKeyWithHashAlg::new(Arc::new(key), hash),
-                )
+                .authenticate_publickey(username, PrivateKeyWithHashAlg::new(Arc::new(key), hash))
                 .await
-                .map_err(|e| format!("Kimlik doğrulama hatası: {e}"))?
+                .map_err(|e| format!("Kimlik doğrulama hatası: {e}"))
         }
         SshAuth::Agent => {
             let mut agent = AgentClient::connect_env()
@@ -299,17 +283,9 @@ let hash = if matches!(key.algorithm(), russh::keys::Algorithm::Rsa { .. }) {
                 .map_err(|e| format!("Agent anahtar listesi alınamadı: {e}"))?;
             let mut result = None;
             for key in identities {
-let hash = if matches!(key.algorithm(), russh::keys::Algorithm::Rsa { .. }) {
-                    session
-                        .best_supported_rsa_hash()
-                        .await
-                        .map_err(|e| format!("RSA karması: {e}"))?
-                        .flatten()
-                } else {
-                    None
-                };
+                let hash = rsa_hash_for(session, key.algorithm()).await?;
                 match session
-                    .authenticate_publickey_with(&params.username, key, hash, &mut agent)
+                    .authenticate_publickey_with(username, key, hash, &mut agent)
                     .await
                 {
                     Ok(r) => {
@@ -322,9 +298,87 @@ let hash = if matches!(key.algorithm(), russh::keys::Algorithm::Rsa { .. }) {
                     Err(_) => continue,
                 }
             }
-            result.ok_or_else(|| "Kimlik doğrulama hatası".to_string())?
+            result.ok_or_else(|| "Kimlik doğrulama hatası".to_string())
         }
+    }
+}
+
+async fn connect_inner(
+    app: AppHandle,
+    params: &SshConnectParams,
+) -> Result<
+    (
+        client::Handle<SshHandler>,
+        ChannelWriteHalf<client::Msg>,
+        Arc<Mutex<VecDeque<Vec<u8>>>>,
+        Option<client::Handle<SshHandler>>,
+    ),
+    String,
+> {
+    let keepalive_secs = app
+        .try_state::<crate::store::Store>()
+        .and_then(|store| {
+            store
+                .conn
+                .lock()
+                .ok()
+                .and_then(|conn| crate::store::settings_get(&conn, "keepaliveSecs"))
+        })
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+
+    let mut config = client::Config::default();
+    config.keepalive_interval = Some(Duration::from_secs(keepalive_secs.max(1)));
+    let config = Arc::new(config);
+    let out = Arc::new(Mutex::new(VecDeque::new()));
+    let handler = SshHandler {
+        app: app.clone(),
+        session_id: params.session_id,
+        host: params.host.clone(),
+        port: params.port,
+        out: out.clone(),
     };
+
+    let (mut session, proxy) = if let Some(jump) = &params.jump {
+        let proxy_out = Arc::new(Mutex::new(VecDeque::new()));
+        let proxy_handler = SshHandler {
+            app: app.clone(),
+            session_id: params.session_id.wrapping_add(1_000_000),
+            host: jump.host.clone(),
+            port: jump.port,
+            out: proxy_out,
+        };
+        let mut proxy_handle = client::connect(
+            config.clone(),
+            (jump.host.as_str(), jump.port),
+            proxy_handler,
+        )
+        .await
+        .map_err(|e| format!("Jump host bağlantısı kurulamadı: {e}"))?;
+        let proxy_auth = authenticate(&mut proxy_handle, &jump.username, &jump.auth).await?;
+        if proxy_auth != client::AuthResult::Success {
+            return Err("Jump host kimlik doğrulaması başarısız (parola/anahtar hatalı olabilir)"
+                .to_string());
+        }
+        let pchannel = proxy_handle
+            .channel_open_direct_tcpip(params.host.clone(), params.port as u32, "127.0.0.1", 0)
+            .await
+            .map_err(|e| format!("Jump kanalı açılamadı: {e}"))?;
+        let stream = pchannel.into_stream();
+        let target = client::connect_stream(config.clone(), stream, handler)
+            .await
+            .map_err(|e| format!("Hedefe jump üzerinden bağlanılamadı: {e}"))?;
+        (target, Some(proxy_handle))
+    } else {
+        (
+            client::connect(config, (params.host.as_str(), params.port), handler)
+                .await
+                .map_err(|e| format!("Bağlantı kurulamadı: {e}"))?,
+            None,
+        )
+    };
+
+    let auth_result = authenticate(&mut session, &params.username, &params.auth).await?;
 
     if auth_result != client::AuthResult::Success {
         return Err("Kimlik doğrulaması başarısız (parola/anahtar hatalı olabilir)".to_string());
@@ -347,7 +401,7 @@ let hash = if matches!(key.algorithm(), russh::keys::Algorithm::Rsa { .. }) {
     tokio::spawn(async move {
         while read_half.wait().await.is_some() {}
     });
-    Ok((session, write_half, out))
+    Ok((session, write_half, out, proxy))
 }
 
 #[tauri::command]
@@ -369,8 +423,25 @@ pub async fn ssh_connect(
         )
         .await
         {
-            Ok(Ok((handle, channel, out))) => {
+            Ok(Ok((handle, channel, out, proxy))) => {
                 eprintln!("[ssh] bağlandı (session {session_id})");
+                let cancelled = mgr
+                    .cancelled
+                    .lock()
+                    .map(|mut c| c.remove(&session_id))
+                    .unwrap_or(false);
+                if cancelled {
+                    eprintln!("[ssh] sekme kapatıldı, oturum iptal (session {session_id})");
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(3),
+                        handle.disconnect(Disconnect::ByApplication, "", ""),
+                    )
+                    .await;
+                    if let Some(proxy) = proxy {
+                        let _ = proxy.disconnect(Disconnect::ByApplication, "", "").await;
+                    }
+                    return;
+                }
                 if let Ok(mut g) = mgr.sessions.lock() {
                     g.insert(
                         session_id,
@@ -378,6 +449,7 @@ pub async fn ssh_connect(
                             handle,
                             channel: tokio::sync::Mutex::new(channel),
                             out,
+                            proxy,
                         }),
                     );
                 } else {
@@ -386,10 +458,27 @@ pub async fn ssh_connect(
                 let _ = app.emit("ssh-connected", SshClose { id: session_id });
             }
             Ok(Err(message)) => {
+                if mgr
+                    .cancelled
+                    .lock()
+                    .map(|c| c.contains(&session_id))
+                    .unwrap_or(false)
+                {
+                    eprintln!("[ssh] iptal edilmiş oturumun hatası yoksayıldı (session {session_id})");
+                    return;
+                }
                 eprintln!("[ssh] hata: {message} (session {session_id})");
                 let _ = app.emit("ssh-error", SshError { id: session_id, message });
             }
             Err(_) => {
+                if mgr
+                    .cancelled
+                    .lock()
+                    .map(|c| c.contains(&session_id))
+                    .unwrap_or(false)
+                {
+                    return;
+                }
                 eprintln!("[ssh] zaman aşımı (session {session_id})");
                 let _ = app.emit(
                     "ssh-error",
@@ -468,6 +557,7 @@ pub async fn ssh_resize(
 
 #[tauri::command]
 pub async fn ssh_close(
+    app: AppHandle,
     state: State<'_, Arc<SshManager>>,
     id: u32,
 ) -> Result<(), String> {
@@ -485,6 +575,16 @@ pub async fn ssh_close(
             session.handle.disconnect(Disconnect::ByApplication, "", ""),
         )
         .await;
+        if let Some(proxy) = &session.proxy {
+            let _ = proxy.disconnect(Disconnect::ByApplication, "", "").await;
+        }
+    } else {
+        if let Ok(mut cancelled) = state.cancelled.lock() {
+            cancelled.insert(id);
+        }
+    }
+    if let Some(tunnels) = app.try_state::<Arc<crate::tunnels::TunnelManager>>() {
+        crate::tunnels::close_tunnels_for_session(tunnels.inner(), id);
     }
     Ok(())
 }

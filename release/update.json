@@ -1,0 +1,15 @@
+{
+  "version": "0.23.0",
+  "notes": "Jump host (ProxyJump), F11 tam ekran, sekmeyi kopyalama",
+  "pub_date": "2026-08-14T21:09:13Z",
+  "platforms": {
+    "linux-x86_64": {
+      "signature": "\nYour file was signed successfully, You can find the signature here:\n/home/opade/Masa\u00fcst\u00fc/uygulama/termius/umayterm/src-tauri/target/release/bundle/appimage/UmayTerm_0.23.0_amd64.AppImage.sig\n\nPublic signature:\ndW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUeWFKUXA1aWlZa2haYTRZWXp2SXlSVkNOamRobkR1NGpJM2ZDa0IvOXpGYmsrUHc5OWkraVhPRzNKUW8zZ2JCV2lEZEVWOFFpUWZMNXd3MDgwS3p6TFRaTkNZS2pvY2dRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2NzQxNzUyCWZpbGU6VW1heVRlcm1fMC4yMy4wX2FtZDY0LkFwcEltYWdlCm5Gc1hmUG9xeHJKYXFFdTNDclBseEJGMGg5WU5VVFlieVplUzlaUWZoZGJiQlFoc2J3dEc1UVF5UWd1L2Z6aUhORzdQV2FiZS9FSldyMGlpTUhLaERRPT0K\n\nMake sure to include this into the signature field of your update server.",
+      "url": "https://updates.umayterm.app/UmayTerm_0.23.0_amd64.AppImage"
+    },
+    "linux-x86_64-deb": {
+      "signature": "\nYour file was signed successfully, You can find the signature here:\n/home/opade/Masa\u00fcst\u00fc/uygulama/termius/umayterm/src-tauri/target/release/bundle/deb/UmayTerm_0.23.0_amd64.deb.sig\n\nPublic signature:\ndW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUeWFKUXA1aWlZa3RKT1NqUVd2L1p3R2ZSM2ljeTJwMnNtVWxNTUEzVHZod05hUHNYdE9UMGRZTS8wMUZWcWlvVlFvdVZGc1ZNUXlXYk1MeG5kS0pFa3FZYTJaZ0hITEE0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2NzQxNzUzCWZpbGU6VW1heVRlcm1fMC4yMy4wX2FtZDY0LmRlYgpzeExmTjFaV2VuVnlYOVBISTg3bEpxY3hsWTNPdVgxdTIveXN2VHFjdFBKS2hOSTBLQlN5R1NVVHBnMlRVazhkaGRvdkt2NW9pd1ZlMmdWNDZXK1JEdz09Cg==\n\nMake sure to include this into the signature field of your update server.",
+      "url": "https://updates.umayterm.app/UmayTerm_0.23.0_amd64.deb"
+    }
+  }
+}

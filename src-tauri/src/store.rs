@@ -67,6 +67,10 @@ pub struct HostRecord {
     pub passphrase: Option<String>,
     pub group_name: String,
     pub tags: String,
+    pub jump_host: Option<String>,
+    pub jump_port: Option<u16>,
+    pub jump_user: Option<String>,
+    pub jump_password: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
 }
@@ -130,8 +134,29 @@ fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
     )
     .map_err(|e| format!("Tablo oluşturulamadı: {e}"))?;
 
+    migrate_jump_columns(&conn);
     migrate_plaintext_secrets(&conn);
     Ok(conn)
+}
+
+fn migrate_jump_columns(conn: &Connection) {
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(hosts)")
+        .map(|mut stmt| {
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .map(|it| it.filter_map(|r| r.ok()).collect())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    for (name, ddl) in [
+        ("jump_host", "ALTER TABLE hosts ADD COLUMN jump_host TEXT NOT NULL DEFAULT ''"),
+        ("jump_port", "ALTER TABLE hosts ADD COLUMN jump_port INTEGER NOT NULL DEFAULT 22"),
+        ("jump_user", "ALTER TABLE hosts ADD COLUMN jump_user TEXT NOT NULL DEFAULT ''"),
+    ] {
+        if !cols.contains(&name.to_string()) {
+            let _ = conn.execute(ddl, []);
+        }
+    }
 }
 
 fn migrate_plaintext_secrets(conn: &Connection) {
@@ -179,8 +204,12 @@ fn row_to_host(row: &rusqlite::Row) -> rusqlite::Result<HostRecord> {
         passphrase: row.get(8)?,
         group_name: row.get(9)?,
         tags: row.get(10)?,
-        created_at: row.get(11)?,
-        updated_at: row.get(12)?,
+        jump_host: row.get(11)?,
+        jump_port: row.get(12)?,
+        jump_user: row.get(13)?,
+        jump_password: None,
+        created_at: row.get(14)?,
+        updated_at: row.get(15)?,
     })
 }
 
@@ -190,7 +219,8 @@ pub fn host_list(state: State<'_, Store>) -> Result<Vec<HostRecord>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT id, name, host, port, username, auth_method, key_path, password,
-                    passphrase, group_name, tags, created_at, updated_at
+                    passphrase, group_name, tags, jump_host, jump_port, jump_user,
+                    created_at, updated_at
              FROM hosts ORDER BY group_name, name",
         )
         .map_err(|e| e.to_string())?;
@@ -205,6 +235,9 @@ pub fn host_list(state: State<'_, Store>) -> Result<Vec<HostRecord>, String> {
             if host.passphrase.is_none() || host.passphrase.as_deref() == Some("") {
                 host.passphrase = secret_get(id, "passphrase");
             }
+            if host.jump_user.as_deref().unwrap_or("") != "" {
+                host.jump_password = secret_get(id, "jump_password");
+            }
         }
         out.push(host);
     }
@@ -218,9 +251,9 @@ pub fn host_save(state: State<'_, Store>, host: HostRecord) -> Result<i64, Strin
         Some(id) => {
             conn.execute(
                 "UPDATE hosts SET name=?1, host=?2, port=?3, username=?4, auth_method=?5,
-                        key_path=?6, group_name=?7, tags=?8,
-                        updated_at=datetime('now')
-                 WHERE id=?9",
+                        key_path=?6, group_name=?7, tags=?8, jump_host=?9, jump_port=?10,
+                        jump_user=?11, updated_at=datetime('now')
+                 WHERE id=?12",
                 params![
                     host.name,
                     host.host,
@@ -230,18 +263,21 @@ pub fn host_save(state: State<'_, Store>, host: HostRecord) -> Result<i64, Strin
                     host.key_path,
                     host.group_name,
                     host.tags,
+                    host.jump_host.as_deref().unwrap_or(""),
+                    host.jump_port.unwrap_or(22),
+                    host.jump_user.as_deref().unwrap_or(""),
                     id
                 ],
             )
             .map_err(|e| e.to_string())?;
-            update_secrets(id, &host);
+            update_secrets(id, &host)?;
             Ok(id)
         }
         None => {
             conn.execute(
                 "INSERT INTO hosts (name, host, port, username, auth_method, key_path,
-                                    group_name, tags)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                                    group_name, tags, jump_host, jump_port, jump_user)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     host.name,
                     host.host,
@@ -250,22 +286,26 @@ pub fn host_save(state: State<'_, Store>, host: HostRecord) -> Result<i64, Strin
                     host.auth_method,
                     host.key_path,
                     host.group_name,
-                    host.tags
+                    host.tags,
+                    host.jump_host.as_deref().unwrap_or(""),
+                    host.jump_port.unwrap_or(22),
+                    host.jump_user.as_deref().unwrap_or("")
                 ],
             )
             .map_err(|e| e.to_string())?;
             let id = conn.last_insert_rowid();
-            update_secrets(id, &host);
+            update_secrets(id, &host)?;
             Ok(id)
         }
     }
 }
 
-fn update_secrets(id: i64, host: &HostRecord) {
+fn update_secrets(id: i64, host: &HostRecord) -> Result<(), String> {
+    let mut problems = Vec::new();
     match host.password.as_deref() {
         Some(p) if !p.is_empty() => {
             if let Err(e) = secret_set(id, "password", p) {
-                eprintln!("[store] keyring uyarısı: {e}");
+                problems.push(format!("parola: {e}"));
             }
         }
         _ => secret_delete(id, "password"),
@@ -273,10 +313,26 @@ fn update_secrets(id: i64, host: &HostRecord) {
     match host.passphrase.as_deref() {
         Some(p) if !p.is_empty() => {
             if let Err(e) = secret_set(id, "passphrase", p) {
-                eprintln!("[store] keyring uyarısı: {e}");
+                problems.push(format!("anahtar parolası: {e}"));
             }
         }
         _ => secret_delete(id, "passphrase"),
+    }
+    match host.jump_password.as_deref() {
+        Some(p) if !p.is_empty() => {
+            if let Err(e) = secret_set(id, "jump_password", p) {
+                problems.push(format!("jump parolası: {e}"));
+            }
+        }
+        _ => secret_delete(id, "jump_password"),
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Host kaydedildi ancak parola keyring'e yazılamadı: {}",
+            problems.join("; ")
+        ))
     }
 }
 
@@ -287,6 +343,7 @@ pub fn host_delete(state: State<'_, Store>, id: i64) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     secret_delete(id, "password");
     secret_delete(id, "passphrase");
+    secret_delete(id, "jump_password");
     Ok(())
 }
 
@@ -299,6 +356,7 @@ pub fn hosts_export(state: State<'_, Store>) -> Result<String, String> {
             h.id = None;
             h.password = None;
             h.passphrase = None;
+            h.jump_password = None;
             h.created_at = None;
             h.updated_at = None;
             h
@@ -387,6 +445,10 @@ pub fn ssh_config_import(state: State<'_, Store>) -> Result<usize, String> {
                 passphrase: None,
                 group_name: String::new(),
                 tags: String::new(),
+                jump_host: None,
+                jump_port: None,
+                jump_user: None,
+                jump_password: None,
                 created_at: None,
                 updated_at: None,
             });

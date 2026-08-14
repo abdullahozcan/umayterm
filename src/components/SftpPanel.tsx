@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { useSessionStore } from "../store";
-import type { SftpEntry } from "../types";
+import type { SftpDone, SftpEntry, SftpProgress } from "../types";
 
 function fmtSize(n: number | null): string {
   if (n == null) return "";
@@ -10,30 +12,77 @@ function fmtSize(n: number | null): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function bytesToB64(buf: ArrayBuffer): string {
-  const bytes = new Uint8Array(buf);
-  let bin = "";
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  }
-  return btoa(bin);
+interface Transfer {
+  opId: number;
+  name: string;
+  dir: "down" | "up";
+  transferred: number;
+  total: number;
+  done: boolean;
+  error: string | null;
 }
+
+let sftpOpId = 1;
 
 export default function SftpPanel() {
   const sessionId = useSessionStore((s) => s.sftpSessionId);
   const setSftpOpen = useSessionStore((s) => s.setSftpOpen);
   const sessions = useSessionStore((s) => s.sessions);
+  const deadIds = useSessionStore((s) => s.deadIds);
   const [cwd, setCwd] = useState("/");
   const [entries, setEntries] = useState<SftpEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState("");
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [transfers, setTransfers] = useState<Transfer[]>([]);
+  const seqRef = useRef(0);
+  const loadRef = useRef<(p: string) => Promise<void>>(async () => {});
+  const cwdRef = useRef("/");
   const session = sessions.find((x) => x.id === sessionId);
+
+  useEffect(() => {
+    if (sessionId == null || session) return;
+    setSftpOpen(false);
+  }, [sessions, sessionId, session, setSftpOpen]);
+
+  useEffect(() => {
+    if (sessionId != null && deadIds.includes(sessionId)) {
+      setSftpOpen(false);
+    }
+  }, [deadIds, sessionId, setSftpOpen]);
+
+  useEffect(() => {
+    const unsubs: Promise<() => void>[] = [
+      listen<SftpProgress>("sftp-progress", (event) => {
+        const p = event.payload;
+        setTransfers((list) =>
+          list.map((t) =>
+            t.opId === p.opId
+              ? { ...t, transferred: p.transferred, total: p.total }
+              : t,
+          ),
+        );
+      }),
+      listen<SftpDone>("sftp-done", (event) => {
+        const p = event.payload;
+        setTransfers((list) =>
+          list.map((t) =>
+            t.opId === p.opId ? { ...t, done: true, error: p.error ?? null } : t,
+          ),
+        );
+        if (p.ok) {
+          void loadRef.current(cwdRef.current);
+        }
+      }),
+    ];
+    return () => {
+      unsubs.forEach((u) => u.then((f) => f()));
+    };
+  }, []);
 
   const load = useCallback(
     async (path: string) => {
       if (sessionId == null) return;
+      const seq = ++seqRef.current;
       setLoading(true);
       setStatus("");
       try {
@@ -41,25 +90,30 @@ export default function SftpPanel() {
           sessionId,
           path,
         });
+        if (seq !== seqRef.current) return;
         setEntries(list);
         setCwd(path);
       } catch (e) {
+        if (seq !== seqRef.current) return;
         setStatus(String(e));
       } finally {
-        setLoading(false);
+        if (seq === seqRef.current) setLoading(false);
       }
     },
     [sessionId],
   );
 
   useEffect(() => {
-    if (sessionId != null) void load("/");
+    if (sessionId != null) {
+      cwdRef.current = "/";
+      void load("/");
+    }
   }, [sessionId, load]);
 
   useEffect(() => {
-    if (sessionId == null || session) return;
-    setSftpOpen(false);
-  }, [sessions, sessionId, session, setSftpOpen]);
+    loadRef.current = load;
+    cwdRef.current = cwd;
+  }, [load, cwd]);
 
   if (sessionId == null || !session) return null;
 
@@ -69,39 +123,49 @@ export default function SftpPanel() {
   };
 
   const download = async (entry: SftpEntry) => {
+    const path = await save({
+      title: "İndirilecek konumu seçin",
+      defaultPath: entry.name,
+    });
+    if (!path) return;
+    const opId = sftpOpId++;
+    setTransfers((list) => [
+      ...list,
+      { opId, name: entry.name, dir: "down", transferred: 0, total: 0, done: false, error: null },
+    ]);
+    setStatus(`İndiriliyor: ${entry.name}...`);
     try {
-      setStatus(`İndiriliyor: ${entry.name}...`);
-      const b64 = await invoke<string>("sftp_read_bytes", {
+      await invoke("sftp_download", {
         sessionId,
         remote: entry.path,
+        local: path,
+        opId,
       });
-      const bin = atob(b64);
-      const bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      const blob = new Blob([bytes]);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = entry.name;
-      a.click();
-      URL.revokeObjectURL(url);
       setStatus(`İndirildi: ${entry.name}`);
     } catch (e) {
       setStatus(String(e));
     }
   };
 
-  const upload = async (file: File) => {
+  const upload = async () => {
+    const path = await open({ multiple: false });
+    if (typeof path !== "string" || !path) return;
+    const name = path.split("/").pop() || path;
+    const joined = cwd.endsWith("/") ? `${cwd}${name}` : `${cwd}/${name}`;
+    const opId = sftpOpId++;
+    setTransfers((list) => [
+      ...list,
+      { opId, name, dir: "up", transferred: 0, total: 0, done: false, error: null },
+    ]);
+    setStatus(`Yükleniyor: ${name}...`);
     try {
-      const data = bytesToB64(await file.arrayBuffer());
-      setStatus(`Yükleniyor: ${file.name}...`);
-      const joined = cwd.endsWith("/") ? `${cwd}${file.name}` : `${cwd}/${file.name}`;
-      const n = await invoke<number>("sftp_write_bytes", {
+      await invoke("sftp_upload", {
         sessionId,
+        local: path,
         remote: joined,
-        dataB64: data,
+        opId,
       });
-      setStatus(`Yüklendi: ${file.name} (${fmtSize(n)})`);
+      setStatus(`Yüklendi: ${name}`);
       void load(cwd);
     } catch (e) {
       setStatus(String(e));
@@ -162,13 +226,12 @@ export default function SftpPanel() {
   };
 
   const segs = cwd.split("/").filter(Boolean);
+  const activeCount = transfers.filter((t) => !t.done).length;
 
   return (
     <div className="sftp-panel">
       <div className="sftp-header">
-        <span className="sftp-title">
-          SFTP — {session.title}
-        </span>
+        <span className="sftp-title">SFTP — {session.title}</span>
         <button
           className="sftp-btn"
           title="Kapat"
@@ -194,9 +257,7 @@ export default function SftpPanel() {
               <span className="sftp-crumb-sep">/</span>
               <button
                 className="sftp-crumb"
-                onClick={() =>
-                  void load("/" + segs.slice(0, i + 1).join("/"))
-                }
+                onClick={() => void load("/" + segs.slice(0, i + 1).join("/"))}
               >
                 {seg}
               </button>
@@ -214,21 +275,11 @@ export default function SftpPanel() {
         </button>
         <button
           className="sftp-btn"
-          title="Yükle"
-          onClick={() => fileInputRef.current?.click()}
+          title="Yükle (dosya seç)"
+          onClick={() => void upload()}
         >
           ⬆ Yükle
         </button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          style={{ display: "none" }}
-          onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (f) void upload(f);
-            e.target.value = "";
-          }}
-        />
       </div>
 
       <div className="sftp-list">
@@ -253,20 +304,76 @@ export default function SftpPanel() {
             <span className="sftp-size">{entry.isDir ? "" : fmtSize(entry.size)}</span>
             <span className="sftp-row-actions">
               {!entry.isDir && (
-                <button className="sftp-btn" title="İndir" onClick={() => void download(entry)}>
+                <button
+                  className="sftp-btn"
+                  title="İndir"
+                  onClick={() => void download(entry)}
+                >
                   ↓
                 </button>
               )}
-              <button className="sftp-btn" title="Yeniden adlandır" onClick={() => void rename(entry)}>
+              <button
+                className="sftp-btn"
+                title="Yeniden adlandır"
+                onClick={() => void rename(entry)}
+              >
                 ✎
               </button>
-              <button className="sftp-btn" title="Sil" onClick={() => void remove(entry)}>
+              <button
+                className="sftp-btn"
+                title="Sil"
+                onClick={() => void remove(entry)}
+              >
                 🗑
               </button>
             </span>
           </div>
         ))}
       </div>
+
+      {activeCount > 0 && (
+        <div className="sftp-transfers">
+          {transfers
+            .filter((t) => !t.done)
+            .map((t) => (
+              <div key={t.opId} className="sftp-transfer">
+                <span className="sftp-transfer-name">
+                  {t.dir === "down" ? "↓" : "↑"} {t.name}
+                </span>
+                <div className="sftp-progress">
+                  <div
+                    className="sftp-progress-fill"
+                    style={{
+                      width:
+                        t.total > 0
+                          ? `${Math.min(100, (t.transferred / t.total) * 100)}%`
+                          : "4%",
+                    }}
+                  />
+                </div>
+                <span className="sftp-transfer-info">
+                  {t.total > 0
+                    ? `${fmtSize(t.transferred)} / ${fmtSize(t.total)}`
+                    : fmtSize(t.transferred)}
+                </span>
+              </div>
+            ))}
+        </div>
+      )}
+      {transfers.filter((t) => t.done && t.error).length > 0 && (
+        <div className="sftp-transfers">
+          {transfers
+            .filter((t) => t.done && t.error)
+            .map((t) => (
+              <div key={t.opId} className="sftp-transfer">
+                <span className="sftp-transfer-name">
+                  {t.dir === "down" ? "↓" : "↑"} {t.name}
+                </span>
+                <span className="sftp-transfer-error">{t.error}</span>
+              </div>
+            ))}
+        </div>
+      )}
 
       {status && <div className="sftp-status">{status}</div>}
     </div>

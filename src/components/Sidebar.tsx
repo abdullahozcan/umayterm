@@ -10,6 +10,7 @@ export default function Sidebar() {
   const deleteHost = useSessionStore((s) => s.deleteHost);
   const deleteSnippet = useSessionStore((s) => s.deleteSnippet);
   const connectToHost = useSessionStore((s) => s.connectToHost);
+  const startEditHost = useSessionStore((s) => s.startEditHost);
   const setConnectOpen = useSessionStore((s) => s.setConnectOpen);
   const setSnippetOpen = useSessionStore((s) => s.setSnippetOpen);
   const runSnippet = useSessionStore((s) => s.runSnippet);
@@ -20,11 +21,13 @@ export default function Sidebar() {
     void loadSnippets();
   }, []);
 
+  const q = query.toLowerCase();
   const filtered = hosts.filter(
     (h) =>
-      h.name.toLowerCase().includes(query.toLowerCase()) ||
-      h.host.toLowerCase().includes(query.toLowerCase()) ||
-      h.username.toLowerCase().includes(query.toLowerCase()),
+      h.name.toLowerCase().includes(q) ||
+      h.host.toLowerCase().includes(q) ||
+      h.username.toLowerCase().includes(q) ||
+      h.tags.toLowerCase().includes(q),
   );
 
   const groups = new Map<string, HostRecord[]>();
@@ -63,8 +66,33 @@ export default function Sidebar() {
                   <span className="host-item-name">{h.name}</span>
                   <span className="host-item-sub">
                     {h.username}@{h.host}:{h.port}
+                    {h.jumpHost ? ` ↪ ${h.jumpUser}@${h.jumpHost}` : ""}
                   </span>
+                  {h.tags && (
+                    <span className="host-item-tags">
+                      {h.tags
+                        .split(",")
+                        .map((t) => t.trim())
+                        .filter(Boolean)
+                        .slice(0, 3)
+                        .map((t) => (
+                          <span key={t} className="host-tag">
+                            {t}
+                          </span>
+                        ))}
+                    </span>
+                  )}
                 </span>
+                <button
+                  className="host-item-del"
+                  title="Düzenle"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    startEditHost(h);
+                  }}
+                >
+                  ✎
+                </button>
                 <button
                   className="host-item-del"
                   title="Sil"

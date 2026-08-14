@@ -18,6 +18,7 @@ import "./styles/app.css";
 const TAB_COLORS = ["#ef4444", "#22c55e", "#3b82f6", "#eab308", "#a855f7", "#f97316"];
 
 function useShortcuts() {
+  const [fullscreen, setFullscreen] = useState(false);
   useEffect(() => {
     const isTypingTarget = (el: Element | null) =>
       !!el &&
@@ -39,6 +40,7 @@ function useShortcuts() {
 
     const onKey = (e: KeyboardEvent) => {
       const st = useSessionStore.getState();
+      if (st.locked) return;
       const el = document.activeElement as HTMLElement | null;
       const terminalFocused = !!el?.closest?.(".xterm");
       const typing = isTypingTarget(el);
@@ -79,6 +81,10 @@ function useShortcuts() {
       } else if (/^[1-9]$/.test(k) && Number(k) <= st.sessions.length) {
         e.preventDefault();
         st.activate(st.sessions[Number(k) - 1].id);
+      } else if (k === "f11") {
+        e.preventDefault();
+        getCurrentWindow().setFullscreen(!fullscreen);
+        setFullscreen(!fullscreen);
       }
     };
 
@@ -97,6 +103,7 @@ function App() {
   const activate = useSessionStore((s) => s.activate);
   const focusSession = useSessionStore((s) => s.focusSession);
   const close = useSessionStore((s) => s.close);
+  const duplicateTab = useSessionStore((s) => s.duplicateTab);
   const setConnectOpen = useSessionStore((s) => s.setConnectOpen);
   const connectOpen = useSessionStore((s) => s.connectOpen);
   const splitSession = useSessionStore((s) => s.splitSession);
@@ -115,6 +122,10 @@ function App() {
   const setBroadcastOpen = useSessionStore((s) => s.setBroadcastOpen);
   const broadcastSend = useSessionStore((s) => s.broadcastSend);
   const deadIds = useSessionStore((s) => s.deadIds);
+  const updateAvailable = useSessionStore((s) => s.updateAvailable);
+  const downloadAndInstall = useSessionStore((s) => s.downloadAndInstall);
+  const toast = useSessionStore((s) => s.toast);
+  const clearToast = useSessionStore((s) => s.clearToast);
   const [broadcastText, setBroadcastText] = useState("");
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editTitle, setEditTitle] = useState("");
@@ -156,6 +167,7 @@ function App() {
       } else {
         await unlockBoot();
       }
+      void st.checkForUpdates();
       const win = getCurrentWindow();
       let closing = false;
       void win.onCloseRequested(async (event) => {
@@ -329,6 +341,15 @@ function App() {
               <button
                 className="term-menu-item"
                 onClick={() => {
+                  duplicateTab(tabMenu.id);
+                  setTabMenu(null);
+                }}
+              >
+                Sekmeyi kopyala
+              </button>
+              <button
+                className="term-menu-item"
+                onClick={() => {
                   close(tabMenu.id);
                   setTabMenu(null);
                 }}
@@ -337,7 +358,18 @@ function App() {
               </button>
             </div>
           )}
-          <button className="tab-new" onClick={() => openLocal()} title="Yeni yerel sekme">
+          <button
+            className="tab-new"
+            onClick={(e) => {
+              if (e.shiftKey) {
+                const dir = window.prompt("Başlangıç dizini (boş = ev):");
+                openLocal(null, dir?.trim() || null);
+              } else {
+                openLocal();
+              }
+            }}
+            title="Yeni yerel sekme (Shift+tık: dizin seç)"
+          >
             +
           </button>
           <div className="tabbar-spacer" />
@@ -397,6 +429,26 @@ function App() {
             ⚙
           </button>
         </div>
+        {updateAvailable && (
+          <div className="update-banner">
+            <span className="update-banner-text">
+              🆕 Yeni sürüm v{updateAvailable.version} mevcut
+            </span>
+            <button
+              className="btn-primary"
+              onClick={() => void downloadAndInstall()}
+            >
+              İndir ve kur
+            </button>
+            <button
+              className="broadcast-close"
+              onClick={() => useSessionStore.setState({ updateAvailable: null })}
+              title="Kapat"
+            >
+              ×
+            </button>
+          </div>
+        )}
         {broadcastOpen && (
           <div className="broadcast-bar">
             <span className="broadcast-label">
@@ -467,6 +519,14 @@ function App() {
       {sftpOpen && <SftpPanel />}
       <TunnelModal />
       {locked && <LockScreen />}
+      {toast && (
+        <div className="toast">
+          <span className="toast-text">{toast}</span>
+          <button className="broadcast-close" onClick={clearToast}>
+            ×
+          </button>
+        </div>
+      )}
     </div>
   );
 }

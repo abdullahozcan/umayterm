@@ -4,7 +4,7 @@ use std::sync::Arc;
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::OpenFlags;
 use serde::Serialize;
-use tauri::State;
+use tauri::{Emitter, State};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 
@@ -78,65 +78,163 @@ pub async fn sftp_list(
     Ok(files)
 }
 
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SftpProgress {
+    pub op_id: u32,
+    pub transferred: u64,
+    pub total: u64,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SftpDone {
+    pub op_id: u32,
+    pub ok: bool,
+    pub error: Option<String>,
+}
+
 #[tauri::command]
 pub async fn sftp_download(
+    app: tauri::AppHandle,
     state: State<'_, Arc<SshManager>>,
     session_id: u32,
     remote: String,
     local: String,
-) -> Result<u64, String> {
+    op_id: u32,
+) -> Result<(), String> {
     let sftp = get_sftp(&state, session_id).await?;
+    let total = sftp
+        .metadata(&remote)
+        .await
+        .map_err(|e| format!("Dosya bilgisi alınamadı: {e}"))?
+        .size
+        .unwrap_or(0);
     let mut file = sftp
         .open(&remote)
         .await
         .map_err(|e| format!("Dosya açılamadı: {e}"))?;
     let mut out = std::fs::File::create(&local)
         .map_err(|e| format!("Yerel dosya oluşturulamadı: {e}"))?;
-    let mut total = 0u64;
+    let mut transferred = 0u64;
     let mut buf = vec![0u8; 65536];
-    loop {
+    let result = loop {
         let n = file
             .read(&mut buf)
             .await
             .map_err(|e| format!("Okuma hatası: {e}"))?;
         if n == 0 {
-            break;
+            break Ok(());
         }
-        out.write_all(&buf[..n])
-            .map_err(|e| format!("Yazma hatası: {e}"))?;
-        total += n as u64;
+        if let Err(e) = out.write_all(&buf[..n]) {
+            break Err(format!("Yazma hatası: {e}"));
+        }
+        transferred += n as u64;
+        if transferred % (65536 * 16) == 0 {
+            let _ = app.emit(
+                "sftp-progress",
+                SftpProgress {
+                    op_id,
+                    transferred,
+                    total,
+                },
+            );
+        }
+    };
+    match result {
+        Ok(()) => {
+            let _ = app.emit(
+                "sftp-progress",
+                SftpProgress {
+                    op_id,
+                    transferred,
+                    total,
+                },
+            );
+            let _ = app.emit("sftp-done", SftpDone { op_id, ok: true, error: None });
+            Ok(())
+        }
+        Err(e) => {
+            let _ = app.emit(
+                "sftp-done",
+                SftpDone {
+                    op_id,
+                    ok: false,
+                    error: Some(e.clone()),
+                },
+            );
+            Err(e)
+        }
     }
-    Ok(total)
 }
 
 #[tauri::command]
 pub async fn sftp_upload(
+    app: tauri::AppHandle,
     state: State<'_, Arc<SshManager>>,
     session_id: u32,
     local: String,
     remote: String,
-) -> Result<u64, String> {
+    op_id: u32,
+) -> Result<(), String> {
     let sftp = get_sftp(&state, session_id).await?;
+    let total = std::fs::metadata(&local)
+        .map_err(|e| format!("Yerel dosya bilgisi alınamadı: {e}"))?
+        .len();
     let mut file = sftp
         .open_with_flags(&remote, OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE)
         .await
         .map_err(|e| format!("Dosya açılamadı: {e}"))?;
     let mut data = std::fs::File::open(&local)
         .map_err(|e| format!("Yerel dosya okunamadı: {e}"))?;
-    let mut total = 0u64;
+    let mut transferred = 0u64;
     let mut buf = vec![0u8; 65536];
-    loop {
+    let result = loop {
         let n = std::io::Read::read(&mut data, &mut buf)
             .map_err(|e| format!("Okuma hatası: {e}"))?;
         if n == 0 {
-            break;
+            break Ok(());
         }
-        file.write_all(&buf[..n])
-            .await
-            .map_err(|e| format!("Yazma hatası: {e}"))?;
-        total += n as u64;
+        if let Err(e) = file.write_all(&buf[..n]).await {
+            break Err(format!("Yazma hatası: {e}"));
+        }
+        transferred += n as u64;
+        if transferred % (65536 * 16) == 0 {
+            let _ = app.emit(
+                "sftp-progress",
+                SftpProgress {
+                    op_id,
+                    transferred,
+                    total,
+                },
+            );
+        }
+    };
+    match result {
+        Ok(()) => {
+            let _ = app.emit(
+                "sftp-progress",
+                SftpProgress {
+                    op_id,
+                    transferred,
+                    total,
+                },
+            );
+            let _ = app.emit("sftp-done", SftpDone { op_id, ok: true, error: None });
+            Ok(())
+        }
+        Err(e) => {
+            let _ = app.emit(
+                "sftp-done",
+                SftpDone {
+                    op_id,
+                    ok: false,
+                    error: Some(e.clone()),
+                },
+            );
+            Err(e)
+        }
     }
-    Ok(total)
 }
 
 #[tauri::command]
@@ -203,6 +301,8 @@ pub async fn sftp_mkfile(
         .map_err(|e| format!("Dosya kapatılamadı: {e}"))
 }
 
+const MAX_BYTE_TRANSFER: usize = 8 * 1024 * 1024;
+
 fn decode_b64(data_b64: &str) -> Result<Vec<u8>, String> {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD
@@ -227,9 +327,16 @@ pub async fn sftp_read_bytes(
         .await
         .map_err(|e| format!("Dosya açılamadı: {e}"))?;
     let mut buf = Vec::new();
-    file.read_to_end(&mut buf)
+    file.take(MAX_BYTE_TRANSFER as u64 + 1)
+        .read_to_end(&mut buf)
         .await
         .map_err(|e| format!("Okuma hatası: {e}"))?;
+    if buf.len() > MAX_BYTE_TRANSFER {
+        return Err(format!(
+            "Dosya {} MB sınırını aşıyor. İndirme işlemini kullanın.",
+            MAX_BYTE_TRANSFER / 1024 / 1024
+        ));
+    }
     Ok(encode_b64(&buf))
 }
 
@@ -241,6 +348,12 @@ pub async fn sftp_write_bytes(
     data_b64: String,
 ) -> Result<u64, String> {
     let data = decode_b64(&data_b64)?;
+    if data.len() > MAX_BYTE_TRANSFER {
+        return Err(format!(
+            "Veri {} MB sınırını aşıyor. Yükleme işlemini kullanın.",
+            MAX_BYTE_TRANSFER / 1024 / 1024
+        ));
+    }
     let sftp = get_sftp(&state, session_id).await?;
     let mut file = sftp
         .open_with_flags(&remote, OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE)

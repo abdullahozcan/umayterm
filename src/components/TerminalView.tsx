@@ -190,7 +190,7 @@ export default function TerminalView({
         sessionId: session.id,
         cols: 80,
         rows: 24,
-        cwd: null,
+        cwd: session.cwd ?? null,
       })
         .then(() => {})
         .catch((e) => {

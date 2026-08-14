@@ -4,6 +4,7 @@ export interface Session {
   kind: "local" | "ssh";
   params?: SshConnectParams;
   color?: string | null;
+  cwd?: string | null;
 }
 
 export type SshAuth =
@@ -18,6 +19,14 @@ export interface SshConnectParams {
   username: string;
   cols: number;
   rows: number;
+  auth: SshAuth;
+  jump?: JumpParams | null;
+}
+
+export interface JumpParams {
+  host: string;
+  port: number;
+  username: string;
   auth: SshAuth;
 }
 
@@ -57,6 +66,10 @@ export interface HostRecord {
   passphrase?: string | null;
   groupName: string;
   tags: string;
+  jumpHost?: string | null;
+  jumpPort?: number | null;
+  jumpUser?: string | null;
+  jumpPassword?: string | null;
   createdAt?: string | null;
   updatedAt?: string | null;
 }
@@ -88,6 +101,18 @@ export interface SftpEntry {
   isSymlink: boolean;
   size: number | null;
   mtime: number | null;
+}
+
+export interface SftpProgress {
+  opId: number;
+  transferred: number;
+  total: number;
+}
+
+export interface SftpDone {
+  opId: number;
+  ok: boolean;
+  error: string | null;
 }
 
 export interface TunnelInfo {

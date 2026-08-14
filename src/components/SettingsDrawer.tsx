@@ -15,6 +15,11 @@ export default function SettingsDrawer() {
   const exportHosts = useSessionStore((s) => s.exportHosts);
   const importHosts = useSessionStore((s) => s.importHosts);
   const importSshConfig = useSessionStore((s) => s.importSshConfig);
+  const checkForUpdates = useSessionStore((s) => s.checkForUpdates);
+  const downloadAndInstall = useSessionStore((s) => s.downloadAndInstall);
+  const updateAvailable = useSessionStore((s) => s.updateAvailable);
+  const updateChecking = useSessionStore((s) => s.updateChecking);
+  const [updateMsg, setUpdateMsg] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
   const [dataMsg, setDataMsg] = useState("");
   const [dataError, setDataError] = useState("");
@@ -58,6 +63,18 @@ export default function SettingsDrawer() {
       setDataMsg(`${n} host ~/.ssh/config'den içe aktarıldı`);
     } catch (e) {
       setDataError(String(e instanceof Error ? e.message : e));
+    }
+  };
+
+  const doCheckUpdates = async () => {
+    setUpdateMsg("");
+    await checkForUpdates();
+    if (useSessionStore.getState().updateAvailable) {
+      setUpdateMsg(
+        `Sürüm ${useSessionStore.getState().updateAvailable!.version} mevcut`,
+      );
+    } else {
+      setUpdateMsg("Güncelleme yok");
     }
   };
   const [lockMode, setLockMode] = useState<"idle" | "setup" | "change" | "remove">(
@@ -289,6 +306,37 @@ export default function SettingsDrawer() {
             />
             {dataMsg && <p className="settings-ok">{dataMsg}</p>}
             {dataError && <p className="form-error">{dataError}</p>}
+          </div>
+
+          <div className="settings-section">Güncelleme</div>
+          <div className="settings-grid">
+            <p className="settings-hint">
+              Otomatik güncelleme AppImage paketi için çalışır. Sunucu:
+              updates.umayterm.app (yapılandırmada değiştirilebilir).
+            </p>
+            {updateAvailable ? (
+              <div className="row2">
+                <button
+                  className="btn-primary"
+                  disabled={updateChecking}
+                  onClick={() => void downloadAndInstall()}
+                >
+                  v{updateAvailable.version} indir ve kur
+                </button>
+                <button className="btn-secondary" onClick={() => void doCheckUpdates()}>
+                  Yeniden kontrol et
+                </button>
+              </div>
+            ) : (
+              <button
+                className="btn-secondary"
+                disabled={updateChecking}
+                onClick={() => void doCheckUpdates()}
+              >
+                {updateChecking ? "Kontrol ediliyor…" : "Güncellemeleri kontrol et"}
+              </button>
+            )}
+            {updateMsg && <p className="settings-ok">{updateMsg}</p>}
           </div>
         </div>
       </div>
