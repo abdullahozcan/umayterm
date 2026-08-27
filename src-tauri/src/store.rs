@@ -69,6 +69,7 @@ pub struct HostRecord {
     pub jump_port: Option<u16>,
     pub jump_user: Option<String>,
     pub jump_password: Option<String>,
+    pub startup_command: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
 }
@@ -150,6 +151,7 @@ fn migrate_jump_columns(conn: &Connection) {
         ("jump_host", "ALTER TABLE hosts ADD COLUMN jump_host TEXT NOT NULL DEFAULT ''"),
         ("jump_port", "ALTER TABLE hosts ADD COLUMN jump_port INTEGER NOT NULL DEFAULT 22"),
         ("jump_user", "ALTER TABLE hosts ADD COLUMN jump_user TEXT NOT NULL DEFAULT ''"),
+        ("startup_command", "ALTER TABLE hosts ADD COLUMN startup_command TEXT"),
     ] {
         if !cols.contains(&name.to_string()) {
             let _ = conn.execute(ddl, []);
@@ -206,8 +208,9 @@ fn row_to_host(row: &rusqlite::Row) -> rusqlite::Result<HostRecord> {
         jump_port: row.get(12)?,
         jump_user: row.get(13)?,
         jump_password: None,
-        created_at: row.get(14)?,
-        updated_at: row.get(15)?,
+        startup_command: row.get(14)?,
+        created_at: row.get(15)?,
+        updated_at: row.get(16)?,
     })
 }
 
@@ -218,7 +221,7 @@ pub fn host_list(state: State<'_, Store>) -> Result<Vec<HostRecord>, String> {
         .prepare(
             "SELECT id, name, host, port, username, auth_method, key_path, password,
                     passphrase, group_name, tags, jump_host, jump_port, jump_user,
-                    created_at, updated_at
+                    startup_command, created_at, updated_at
              FROM hosts ORDER BY group_name, name",
         )
         .map_err(|e| e.to_string())?;
@@ -249,7 +252,7 @@ pub fn host_list_safe(state: State<'_, Store>) -> Result<Vec<HostRecord>, String
         .prepare(
             "SELECT id, name, host, port, username, auth_method, key_path, password,
                     passphrase, group_name, tags, jump_host, jump_port, jump_user,
-                    created_at, updated_at
+                    startup_command, created_at, updated_at
              FROM hosts ORDER BY group_name, name",
         )
         .map_err(|e| e.to_string())?;
@@ -272,7 +275,7 @@ pub fn host_get_secrets(state: State<'_, Store>, id: i64) -> Result<HostRecord, 
         .query_row(
             "SELECT id, name, host, port, username, auth_method, key_path, password,
                     passphrase, group_name, tags, jump_host, jump_port, jump_user,
-                    created_at, updated_at
+                    startup_command, created_at, updated_at
              FROM hosts WHERE id=?1",
             params![id],
             row_to_host,
@@ -298,8 +301,8 @@ pub fn host_save(state: State<'_, Store>, host: HostRecord) -> Result<i64, Strin
             conn.execute(
                 "UPDATE hosts SET name=?1, host=?2, port=?3, username=?4, auth_method=?5,
                         key_path=?6, group_name=?7, tags=?8, jump_host=?9, jump_port=?10,
-                        jump_user=?11, updated_at=datetime('now')
-                 WHERE id=?12",
+                        jump_user=?11, startup_command=?12, updated_at=datetime('now')
+                 WHERE id=?13",
                 params![
                     host.name,
                     host.host,
@@ -312,6 +315,7 @@ pub fn host_save(state: State<'_, Store>, host: HostRecord) -> Result<i64, Strin
                     host.jump_host.as_deref().unwrap_or(""),
                     host.jump_port.unwrap_or(22),
                     host.jump_user.as_deref().unwrap_or(""),
+                    host.startup_command,
                     id
                 ],
             )
@@ -322,8 +326,9 @@ pub fn host_save(state: State<'_, Store>, host: HostRecord) -> Result<i64, Strin
         None => {
             conn.execute(
                 "INSERT INTO hosts (name, host, port, username, auth_method, key_path,
-                                    group_name, tags, jump_host, jump_port, jump_user)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                                    group_name, tags, jump_host, jump_port, jump_user,
+                                    startup_command)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     host.name,
                     host.host,
@@ -335,7 +340,8 @@ pub fn host_save(state: State<'_, Store>, host: HostRecord) -> Result<i64, Strin
                     host.tags,
                     host.jump_host.as_deref().unwrap_or(""),
                     host.jump_port.unwrap_or(22),
-                    host.jump_user.as_deref().unwrap_or("")
+                    host.jump_user.as_deref().unwrap_or(""),
+                    host.startup_command
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -409,6 +415,59 @@ pub fn hosts_export(state: State<'_, Store>) -> Result<String, String> {
         })
         .collect();
     serde_json::to_string_pretty(&clean).map_err(|e| e.to_string())
+}
+
+fn cfg_clean(s: &str) -> String {
+    s.chars()
+        .filter(|c| *c != '\n' && *c != '\r' && *c != '\t')
+        .collect()
+}
+
+#[tauri::command]
+pub fn hosts_export_ssh_config(state: State<'_, Store>) -> Result<String, String> {
+    let hosts = host_list(state)?;
+    let home =
+        std::env::var("HOME").map_err(|_| "HOME ortam değişkeni bulunamadı".to_string())?;
+    let dir = PathBuf::from(&home).join(".ssh");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("~/.ssh oluşturulamadı: {e}"))?;
+    let path = dir.join("config.umayterm");
+
+    let mut out = String::new();
+    out.push_str("# UmayTerm tarafından oluşturuldu. Yüklemek için ~/.ssh/config içine ekleyin:\n");
+    out.push_str("#   Include config.umayterm\n\n");
+    for h in &hosts {
+        if h.host.trim().is_empty() || h.username.trim().is_empty() {
+            continue;
+        }
+        let name = cfg_clean(h.name.trim());
+        let hostname = cfg_clean(h.host.trim());
+        let username = cfg_clean(h.username.trim());
+        out.push_str(&format!("Host {name}\n"));
+        out.push_str(&format!("    HostName {hostname}\n"));
+        out.push_str(&format!("    User {username}\n"));
+        out.push_str(&format!("    Port {}\n", h.port));
+        if h.auth_method == "key" {
+            if let Some(kp) = h.key_path.as_deref() {
+                let kp = kp.trim();
+                if !kp.is_empty() {
+                    let expanded = kp.replace("~", &home);
+                    out.push_str(&format!("    IdentityFile {expanded}\n"));
+                }
+            }
+        }
+        if let (Some(jh), Some(ju)) = (h.jump_host.as_deref(), h.jump_user.as_deref()) {
+            if !jh.is_empty() && !ju.is_empty() {
+                out.push_str(&format!(
+                    "    ProxyJump {}@{}\n",
+                    cfg_clean(ju),
+                    cfg_clean(jh)
+                ));
+            }
+        }
+        out.push('\n');
+    }
+    std::fs::write(&path, out).map_err(|e| format!("Dosya yazılamadı: {e}"))?;
+    Ok(path.display().to_string())
 }
 
 fn insert_host_if_new(
@@ -497,6 +556,7 @@ pub fn ssh_config_import(state: State<'_, Store>) -> Result<usize, String> {
                 jump_port: None,
                 jump_user: None,
                 jump_password: None,
+                startup_command: None,
                 created_at: None,
                 updated_at: None,
             });
@@ -806,4 +866,40 @@ pub fn snippet_delete(state: State<'_, Store>, id: i64) -> Result<(), String> {
     conn.execute("DELETE FROM snippets WHERE id=?1", params![id])
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+pub fn snippets_export(state: State<'_, Store>) -> Result<String, String> {
+    let list = snippet_list(state)?;
+    let clean: Vec<Snippet> = list
+        .into_iter()
+        .map(|mut s| {
+            s.id = None;
+            s.created_at = None;
+            s
+        })
+        .collect();
+    serde_json::to_string_pretty(&clean).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn snippets_import(
+    state: State<'_, Store>,
+    snippets: Vec<Snippet>,
+) -> Result<usize, String> {
+    let mut imported = 0;
+    for s in snippets {
+        if s.name.trim().is_empty() || s.command.trim().is_empty() {
+            continue;
+        }
+        snippet_save(state.clone(), Snippet {
+            id: None,
+            name: s.name.trim().to_string(),
+            command: s.command,
+            created_at: None,
+        })
+        .map_err(|e| e.to_string())?;
+        imported += 1;
+    }
+    Ok(imported)
 }

@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { useSessionStore } from "../store";
 import { THEMES } from "../themes";
+import { t } from "../i18n";
 
 export default function SettingsDrawer() {
   const open = useSessionStore((s) => s.settingsOpen);
@@ -15,6 +16,9 @@ export default function SettingsDrawer() {
   const exportHosts = useSessionStore((s) => s.exportHosts);
   const importHosts = useSessionStore((s) => s.importHosts);
   const importSshConfig = useSessionStore((s) => s.importSshConfig);
+  const exportSshConfig = useSessionStore((s) => s.exportSshConfig);
+  const exportSnippets = useSessionStore((s) => s.exportSnippets);
+  const importSnippets = useSessionStore((s) => s.importSnippets);
   const checkForUpdates = useSessionStore((s) => s.checkForUpdates);
   const downloadAndInstall = useSessionStore((s) => s.downloadAndInstall);
   const updateAvailable = useSessionStore((s) => s.updateAvailable);
@@ -23,6 +27,7 @@ export default function SettingsDrawer() {
   const fileRef = useRef<HTMLInputElement>(null);
   const [dataMsg, setDataMsg] = useState("");
   const [dataError, setDataError] = useState("");
+  const snippetFileRef = useRef<HTMLInputElement>(null);
 
   const doExport = async () => {
     setDataMsg("");
@@ -61,6 +66,48 @@ export default function SettingsDrawer() {
     try {
       const n = await importSshConfig();
       setDataMsg(`${n} host ~/.ssh/config'den içe aktarıldı`);
+    } catch (e) {
+      setDataError(String(e instanceof Error ? e.message : e));
+    }
+  };
+
+  const doExportSshConfig = async () => {
+    setDataMsg("");
+    setDataError("");
+    try {
+      const path = await exportSshConfig();
+      setDataMsg(`Dışa aktarıldı: ${path}`);
+    } catch (e) {
+      setDataError(String(e instanceof Error ? e.message : e));
+    }
+  };
+
+  const doExportSnippets = async () => {
+    setDataMsg("");
+    setDataError("");
+    try {
+      const json = await exportSnippets();
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "umayterm-snippets.json";
+      a.click();
+      URL.revokeObjectURL(url);
+      setDataMsg("Snippet yedeği indirildi");
+    } catch (e) {
+      setDataError(String(e instanceof Error ? e.message : e));
+    }
+  };
+
+  const onImportSnippets = async (file: File | null) => {
+    setDataMsg("");
+    setDataError("");
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const n = await importSnippets(text);
+      setDataMsg(`${n} snippet içe aktarıldı`);
     } catch (e) {
       setDataError(String(e instanceof Error ? e.message : e));
     }
@@ -110,16 +157,16 @@ export default function SettingsDrawer() {
     <div className="drawer-backdrop" onClick={() => setOpen(false)}>
       <div className="drawer drawer-right" onClick={(e) => e.stopPropagation()}>
         <div className="drawer-header">
-          <h2>Ayarlar</h2>
+          <h2>{t("settings.title")}</h2>
           <button className="modal-close" onClick={() => setOpen(false)}>
             ×
           </button>
         </div>
         <div className="drawer-body">
-          <div className="settings-section">Görünüm</div>
+          <div className="settings-section">{t("settings.appearance")}</div>
           <div className="settings-grid">
             <label>
-              Font ailesi
+              {t("settings.fontFamily")}
               <input
                 value={settings.fontFamily}
                 onChange={(e) => update("fontFamily", e.target.value)}
@@ -128,7 +175,7 @@ export default function SettingsDrawer() {
             </label>
             <div className="row2">
               <label>
-                Font boyutu
+                {t("settings.fontSize")}
                 <input
                   type="number"
                   min={8}
@@ -138,7 +185,7 @@ export default function SettingsDrawer() {
                 />
               </label>
               <label>
-                Satır yüksekliği
+                {t("settings.lineHeight")}
                 <input
                   type="number"
                   min={0.8}
@@ -150,7 +197,7 @@ export default function SettingsDrawer() {
               </label>
             </div>
             <label>
-              Scrollback (satır)
+              {t("settings.scrollback")}
               <input
                 type="number"
                 min={1000}
@@ -159,9 +206,30 @@ export default function SettingsDrawer() {
                 onChange={(e) => update("scrollback", Number(e.target.value))}
               />
             </label>
+            <label>
+              {t("settings.accent")}
+              <div className="accent-row">
+                {["#22d3ee", "#3b82f6", "#a855f7", "#ec4899", "#22c55e", "#f59e0b", "#ef4444"].map((c) => (
+                  <button
+                    key={c}
+                    className={`accent-swatch ${settings.accentColor === c ? "active" : ""}`}
+                    style={{ background: c }}
+                    title={c}
+                    onClick={() => update("accentColor", c)}
+                  />
+                ))}
+                <label className="accent-custom" title="Özel renk seç">
+                  <input
+                    type="color"
+                    value={settings.accentColor}
+                    onChange={(e) => update("accentColor", e.target.value)}
+                  />
+                </label>
+              </div>
+            </label>
           </div>
 
-          <div className="settings-section">Tema</div>
+          <div className="settings-section">{t("settings.theme")}</div>
           <div className="sidebar-themes-list">
             {Object.values(THEMES).map((t) => (
               <button
@@ -179,10 +247,24 @@ export default function SettingsDrawer() {
             ))}
           </div>
 
-          <div className="settings-section">SSH</div>
+          <div className="settings-section">Dil / Language</div>
           <div className="settings-grid">
             <label>
-              Keepalive (saniye) — yeni bağlantılara uygulanır
+              {t("settings.language")}
+              <select
+                value={settings.language}
+                onChange={(e) => update("language", e.target.value)}
+              >
+                <option value="tr">{t("settings.lang.tr")}</option>
+                <option value="en">{t("settings.lang.en")}</option>
+              </select>
+            </label>
+          </div>
+
+          <div className="settings-section">{t("settings.ssh")}</div>
+          <div className="settings-grid">
+            <label>
+              {t("settings.keepalive")}
               <input
                 type="number"
                 min={5}
@@ -192,13 +274,13 @@ export default function SettingsDrawer() {
               />
             </label>
             <label>
-              Zil
+              {t("settings.bell")}
               <select
                 value={settings.bellStyle}
                 onChange={(e) => update("bellStyle", e.target.value)}
               >
-                <option value="none">Yok</option>
-                <option value="sound">Ses</option>
+                <option value="none">{t("settings.bell.none")}</option>
+                <option value="sound">{t("settings.bell.sound")}</option>
               </select>
             </label>
             <label className="checkbox-label">
@@ -207,29 +289,28 @@ export default function SettingsDrawer() {
                 checked={settings.confirmMultilinePaste}
                 onChange={(e) => update("confirmMultilinePaste", e.target.checked)}
               />
-              Çok satırlı yapıştırmada onay sor
+              {t("settings.pasteConfirm")}
             </label>
           </div>
 
-          <div className="settings-section">Uygulama kilidi</div>
+          <div className="settings-section">{t("settings.lock")}</div>
           <div className="settings-grid">
             <p className="settings-hint">
-              Kilit, başlangıçta ve 🔒 butonuyla etkinleşir; tüm kayıtlı
-              bağlantıları gizler.
+              {t("settings.lockHint")}
             </p>
             {lockMode === "idle" && (
               <div className="row2">
                 {!lockEnabled ? (
                   <button className="btn-primary" onClick={() => setLockMode("setup")}>
-                    Parola belirle
+                    {t("settings.lock.set")}
                   </button>
                 ) : (
                   <>
                     <button className="btn-primary" onClick={() => setLockMode("change")}>
-                      Parolayı değiştir
+                      {t("settings.lock.change")}
                     </button>
                     <button className="btn-danger" onClick={() => setLockMode("remove")}>
-                      Kilidi kaldır
+                      {t("settings.lock.remove")}
                     </button>
                   </>
                 )}
@@ -239,7 +320,7 @@ export default function SettingsDrawer() {
               <div className="lock-form">
                 {lockMode === "change" || lockMode === "remove" ? (
                   <label>
-                    Mevcut parola
+                    {t("settings.lock.current")}
                     <input
                       type="password"
                       autoComplete="new-password"
@@ -250,7 +331,7 @@ export default function SettingsDrawer() {
                 ) : null}
                 {lockMode !== "remove" && (
                   <label>
-                    Yeni parola
+                    {t("settings.lock.new")}
                     <input
                       type="password"
                       autoComplete="new-password"
@@ -261,7 +342,7 @@ export default function SettingsDrawer() {
                 )}
                 <div className="row2">
                   <button className="btn-primary" onClick={submitLock}>
-                    Kaydet
+                    {t("settings.save")}
                   </button>
                   <button
                     className="btn-secondary"
@@ -272,7 +353,7 @@ export default function SettingsDrawer() {
                       setLockError("");
                     }}
                   >
-                    Vazgeç
+                    {t("settings.cancel")}
                   </button>
                 </div>
               </div>
@@ -281,19 +362,43 @@ export default function SettingsDrawer() {
             {lockError && <p className="form-error">{lockError}</p>}
           </div>
 
-          <div className="settings-section">Veri</div>
+          <div className="settings-section">{t("settings.data")}</div>
           <div className="settings-grid">
             <div className="row2">
               <button className="btn-primary" onClick={() => void doExport()}>
-                Hostları dışa aktar
+                {t("settings.exportHosts")}
               </button>
               <button className="btn-primary" onClick={() => fileRef.current?.click()}>
-                JSON içe aktar
+                {t("settings.importJson")}
               </button>
             </div>
             <button className="btn-secondary" onClick={() => void doSshConfig()}>
-              ~/.ssh/config'den host içe aktar
+              {t("settings.importSshConfig")}
             </button>
+            <button className="btn-secondary" onClick={() => void doExportSshConfig()}>
+              {t("settings.exportSshConfig")}
+            </button>
+            <div className="row2">
+              <button className="btn-secondary" onClick={() => void doExportSnippets()}>
+                {t("settings.exportSnippets")}
+              </button>
+              <button
+                className="btn-secondary"
+                onClick={() => snippetFileRef.current?.click()}
+              >
+                {t("settings.importSnippets")}
+              </button>
+            </div>
+            <input
+              ref={snippetFileRef}
+              type="file"
+              accept=".json,application/json"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                void onImportSnippets(e.target.files?.[0] ?? null);
+                e.target.value = "";
+              }}
+            />
             <input
               ref={fileRef}
               type="file"
@@ -308,11 +413,10 @@ export default function SettingsDrawer() {
             {dataError && <p className="form-error">{dataError}</p>}
           </div>
 
-          <div className="settings-section">Güncelleme</div>
+          <div className="settings-section">{t("settings.update")}</div>
           <div className="settings-grid">
             <p className="settings-hint">
-              Otomatik güncelleme AppImage paketi için çalışır. Sunucu:
-              updates.umayterm.app (yapılandırmada değiştirilebilir).
+              {t("settings.updateHint")}
             </p>
             {updateAvailable ? (
               <div className="row2">
@@ -321,10 +425,10 @@ export default function SettingsDrawer() {
                   disabled={updateChecking}
                   onClick={() => void downloadAndInstall()}
                 >
-                  v{updateAvailable.version} indir ve kur
+                  {t("settings.install", { version: updateAvailable.version })}
                 </button>
                 <button className="btn-secondary" onClick={() => void doCheckUpdates()}>
-                  Yeniden kontrol et
+                  {t("settings.recheck")}
                 </button>
               </div>
             ) : (
@@ -333,7 +437,7 @@ export default function SettingsDrawer() {
                 disabled={updateChecking}
                 onClick={() => void doCheckUpdates()}
               >
-                {updateChecking ? "Kontrol ediliyor…" : "Güncellemeleri kontrol et"}
+                {updateChecking ? t("settings.checking") : t("settings.checkUpdate")}
               </button>
             )}
             {updateMsg && <p className="settings-ok">{updateMsg}</p>}

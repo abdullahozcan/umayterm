@@ -49,6 +49,8 @@ export interface AppSettings {
   keepaliveSecs: number;
   confirmMultilinePaste: boolean;
   aiModel: string;
+  accentColor: string;
+  language: string;
 }
 
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
@@ -70,6 +72,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   keepaliveSecs: 30,
   confirmMultilinePaste: true,
   aiModel: "openrouter/auto",
+  accentColor: "#22d3ee",
+  language: "tr",
 };
 
 function parseSettings(raw: Record<string, string>): AppSettings {
@@ -94,6 +98,8 @@ function parseSettings(raw: Record<string, string>): AppSettings {
   }
   if (raw.confirmMultilinePaste === "false") s.confirmMultilinePaste = false;
   if (raw.aiModel) s.aiModel = raw.aiModel;
+  if (raw.accentColor) s.accentColor = raw.accentColor;
+  if (raw.language === "tr" || raw.language === "en") s.language = raw.language;
   return s;
 }
 
@@ -107,8 +113,12 @@ interface SessionStore {
   pendingCloseId: number | null;
   stats: Record<number, SshStats>;
   statsOpen: Record<number, boolean>;
+  sessionLogs: Record<number, string>;
+  tabCwd: Record<number, string>;
   aiOpen: boolean;
   aiKeySet: boolean;
+  aiExternal: { text: string; ts: number } | null;
+  opencodeOpen: boolean;
   connectOpen: boolean;
   snippetOpen: boolean;
   pendingHostKey: PendingHostKey | null;
@@ -150,6 +160,7 @@ interface SessionStore {
   markDead: (id: number) => void;
   renameSession: (id: number, title: string) => void;
   setSessionColor: (id: number, color: string | null) => void;
+  toggleReadOnly: (id: number) => void;
   moveSession: (fromId: number, toId: number) => void;
   saveSessions: () => Promise<void>;
   restoreSessions: () => Promise<number>;
@@ -184,6 +195,7 @@ interface SessionStore {
   exportHosts: () => Promise<string>;
   importHosts: (json: string) => Promise<number>;
   importSshConfig: () => Promise<number>;
+  exportSshConfig: () => Promise<string>;
   connectToHost: (host: HostRecord, color?: string | null) => void;
   setConnecting: (connecting: boolean, id: number) => void;
   setTheme: (id: string) => void;
@@ -192,11 +204,16 @@ interface SessionStore {
   setSplit: (dir: "h" | "v", frac: number) => void;
   setStats: (id: number, stats: SshStats) => void;
   toggleStats: (id: number) => void;
+  toggleLog: (id: number) => Promise<void>;
   setAiOpen: (open: boolean) => void;
   setAiKeySet: (set: boolean) => void;
+  aiAsk: (text: string) => void;
+  setOpencodeOpen: (open: boolean) => void;
   loadSnippets: () => Promise<void>;
   saveSnippet: (snippet: Snippet) => Promise<void>;
   deleteSnippet: (id: number) => Promise<void>;
+  exportSnippets: () => Promise<string>;
+  importSnippets: (json: string) => Promise<number>;
   runSnippet: (snippet: Snippet) => void;
   runDevCommand: (command: string) => void;
   checkLockStatus: () => Promise<boolean>;
@@ -270,8 +287,12 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   pendingCloseId: null,
   stats: {},
   statsOpen: {},
+  sessionLogs: {},
+  tabCwd: {},
   aiOpen: false,
   aiKeySet: false,
+  aiExternal: null,
+  opencodeOpen: false,
   connectOpen: false,
   snippetOpen: false,
   pendingHostKey: null,
@@ -431,6 +452,14 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   setSessionColor: (id, color) => {
     set((s) => ({
       sessions: s.sessions.map((x) => (x.id === id ? { ...x, color } : x)),
+    }));
+  },
+
+  toggleReadOnly: (id) => {
+    set((s) => ({
+      sessions: s.sessions.map((x) =>
+        x.id === id ? { ...x, readOnly: !x.readOnly } : x,
+      ),
     }));
   },
 
@@ -633,6 +662,12 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     return n;
   },
 
+  exportSshConfig: async () => {
+    return await invoke<string>("hosts_export_ssh_config").catch((e) => {
+      throw new Error(String(e));
+    });
+  },
+
   connectToHost: async (host, color) => {
     let secrets: HostRecord = host;
     if (host.id) {
@@ -670,6 +705,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         username: secrets.username,
         auth,
         jump,
+        startupCommand: secrets.startupCommand ?? null,
       },
       color,
     );
@@ -725,9 +761,36 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       statsOpen: { ...s.statsOpen, [id]: !s.statsOpen[id] },
     })),
 
+  toggleLog: async (id) => {
+    const s = get();
+    const session = s.sessions.find((x) => x.id === id);
+    if (!session || session.kind !== "local") return;
+    if (s.sessionLogs[id]) {
+      await invoke("pty_log_stop", { id }).catch(() => {});
+      set((st) => {
+        const sessionLogs = { ...st.sessionLogs };
+        delete sessionLogs[id];
+        return { sessionLogs };
+      });
+      showToast("Oturum kaydı durduruldu");
+    } else {
+      const path = await invoke<string>("pty_log_start", { id }).catch(() => "");
+      if (path) {
+        set((st) => ({
+          sessionLogs: { ...st.sessionLogs, [id]: path },
+        }));
+        showToast("Kayıt başladı (kapatınca sona erer)");
+      }
+    }
+  },
+
   setAiOpen: (open) => set({ aiOpen: open }),
 
   setAiKeySet: (value) => set({ aiKeySet: value }),
+
+  aiAsk: (text) => set({ aiExternal: { text, ts: Date.now() }, aiOpen: true }),
+
+  setOpencodeOpen: (open) => set({ opencodeOpen: open }),
 
   loadSnippets: async () => {
     const snippets = await invoke<Snippet[]>("snippet_list").catch(() => []);
@@ -744,10 +807,31 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     await get().loadSnippets();
   },
 
+  exportSnippets: async () => {
+    return await invoke<string>("snippets_export").catch((e) => {
+      throw new Error(String(e));
+    });
+  },
+
+  importSnippets: async (json) => {
+    const snippets = JSON.parse(json) as Snippet[];
+    const n = await invoke<number>("snippets_import", { snippets }).catch((e) => {
+      throw new Error(String(e));
+    });
+    await get().loadSnippets();
+    return n;
+  },
+
   runSnippet: (snippet) => {
     const active = get().activeId;
     if (active == null) return;
-    writeSession(active, snippet.command);
+    const cmd = snippet.command;
+    writeSession(active, cmd);
+    const m = cmd.indexOf("${");
+    if (m >= 0 && !cmd.includes("\n")) {
+      const after = cmd.length - m;
+      if (after > 0) writeSession(active, `\x1b[${after}D`);
+    }
   },
 
   runDevCommand: (command) => {
@@ -851,6 +935,14 @@ if (!hostKeyListener) {
     useSessionStore.setState((s) => ({
       deadIds: s.deadIds.filter((x) => x !== event.payload.id),
     }));
+    const session = useSessionStore.getState().sessions.find(
+      (x) => x.id === event.payload.id,
+    );
+    if (session?.kind === "ssh" && session.params.startupCommand) {
+      const cmd = session.params.startupCommand;
+      const bytes = Array.from(new TextEncoder().encode(cmd + "\r"));
+      invoke("ssh_write", { id: session.id, data: bytes }).catch(() => {});
+    }
   });
   void listen<{ id: number }>("ssh-error", (event) => {
     useSessionStore.getState().setConnecting(false, event.payload.id);
@@ -862,5 +954,13 @@ if (!hostKeyListener) {
   });
   void listen<{ id: number }>("pty-exit", (event) => {
     useSessionStore.getState().markDead(event.payload.id);
+  });
+  void listen<{ id: number; cwd: string }>("pty-cwd", (event) => {
+    useSessionStore.setState((s) => ({
+      tabCwd: { ...s.tabCwd, [event.payload.id]: event.payload.cwd },
+    }));
+  });
+  void listen<{ id: number; seconds: number }>("pty-cmd-done", (event) => {
+    showToast(`Komut tamamlandı (${event.payload.seconds}s)`);
   });
 }

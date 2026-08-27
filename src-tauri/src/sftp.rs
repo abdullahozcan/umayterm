@@ -1,12 +1,11 @@
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::OpenFlags;
 use serde::Serialize;
 use tauri::{Emitter, State};
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::ssh::SshManager;
 
@@ -102,6 +101,7 @@ pub async fn sftp_download(
     remote: String,
     local: String,
     op_id: u32,
+    resume: bool,
 ) -> Result<(), String> {
     let sftp = get_sftp(&state, session_id).await?;
     let total = sftp
@@ -114,9 +114,47 @@ pub async fn sftp_download(
         .open(&remote)
         .await
         .map_err(|e| format!("Dosya açılamadı: {e}"))?;
-    let mut out = std::fs::File::create(&local)
-        .map_err(|e| format!("Yerel dosya oluşturulamadı: {e}"))?;
-    let mut transferred = 0u64;
+
+    let mut start = 0u64;
+    let mut out;
+    if resume {
+        if let Ok(meta) = std::fs::metadata(&local) {
+            let existing = meta.len();
+            if existing > 0 && existing < total {
+                start = existing;
+                file.seek(SeekFrom::Start(start))
+                    .await
+                    .map_err(|e| format!("Sığınma hatası: {e}"))?;
+                out = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&local)
+                    .map_err(|e| format!("Yerel dosya açılamadı: {e}"))?;
+            } else if existing >= total {
+                let _ = app.emit(
+                    "sftp-progress",
+                    SftpProgress {
+                        op_id,
+                        transferred: total,
+                        total,
+                    },
+                );
+                let _ = app.emit("sftp-done", SftpDone { op_id, ok: true, error: None });
+                return Ok(());
+            } else {
+                out = std::fs::File::create(&local)
+                    .map_err(|e| format!("Yerel dosya oluşturulamadı: {e}"))?;
+            }
+        } else {
+            out = std::fs::File::create(&local)
+                .map_err(|e| format!("Yerel dosya oluşturulamadı: {e}"))?;
+        }
+    } else {
+        out = std::fs::File::create(&local)
+            .map_err(|e| format!("Yerel dosya oluşturulamadı: {e}"))?;
+    }
+
+    let mut transferred = start;
     let mut buf = vec![0u8; 65536];
     let result = loop {
         let n = file
@@ -176,18 +214,42 @@ pub async fn sftp_upload(
     local: String,
     remote: String,
     op_id: u32,
+    resume: bool,
 ) -> Result<(), String> {
     let sftp = get_sftp(&state, session_id).await?;
     let total = std::fs::metadata(&local)
         .map_err(|e| format!("Yerel dosya bilgisi alınamadı: {e}"))?
         .len();
+    let remote_size = sftp
+        .metadata(&remote)
+        .await
+        .ok()
+        .and_then(|m| m.size)
+        .unwrap_or(0);
+
+    let mut start = 0u64;
+    if resume && remote_size > 0 && remote_size < total {
+        start = remote_size;
+    }
+    let flags = if start > 0 {
+        OpenFlags::WRITE | OpenFlags::CREATE
+    } else {
+        OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE
+    };
     let mut file = sftp
-        .open_with_flags(&remote, OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE)
+        .open_with_flags(&remote, flags)
         .await
         .map_err(|e| format!("Dosya açılamadı: {e}"))?;
+    if start > 0 {
+        file.seek(SeekFrom::Start(start))
+            .await
+            .map_err(|e| format!("Sığınma hatası: {e}"))?;
+    }
     let mut data = std::fs::File::open(&local)
         .map_err(|e| format!("Yerel dosya okunamadı: {e}"))?;
-    let mut transferred = 0u64;
+    data.seek(SeekFrom::Start(start))
+        .map_err(|e| format!("Yerel dosya konumlandırılamadı: {e}"))?;
+    let mut transferred = start;
     let mut buf = vec![0u8; 65536];
     let result = loop {
         let n = std::io::Read::read(&mut data, &mut buf)

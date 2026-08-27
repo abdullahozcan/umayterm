@@ -4,6 +4,7 @@ export interface SessionBase {
   id: number;
   title: string;
   color?: string | null;
+  readOnly?: boolean;
 }
 
 export interface LocalSession extends SessionBase {
@@ -32,6 +33,7 @@ export interface SshConnectParams {
   rows: number;
   auth: SshAuth;
   jump?: JumpParams | null;
+  startupCommand?: string | null;
 }
 
 export interface JumpParams {
@@ -83,6 +85,7 @@ export interface HostRecord {
   jumpPort?: number | null;
   jumpUser?: string | null;
   jumpPassword?: string | null;
+  startupCommand?: string | null;
   createdAt?: string | null;
   updatedAt?: string | null;
 }
@@ -170,3 +173,32 @@ export type AiEvent =
   | { type: "chunk"; content: string }
   | { type: "done" }
   | { type: "error"; message: string };
+
+export interface OpencodePart {
+  id: string;
+  type: string;
+  text?: string | null;
+  tool?: string | null;
+  status?: string | null;
+  timeCreated: number;
+}
+
+export interface OpencodeMessage {
+  id: string;
+  role: string;
+  agent?: string | null;
+  model?: string | null;
+  timeCreated: number;
+  parts: OpencodePart[];
+}
+
+export interface OpencodeSession {
+  id: string;
+  title: string;
+  directory: string;
+  parentId?: string | null;
+  timeCreated: number;
+  timeUpdated: number;
+  messages: OpencodeMessage[];
+  children: OpencodeSession[];
+}

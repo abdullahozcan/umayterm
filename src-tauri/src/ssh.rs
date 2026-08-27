@@ -1034,3 +1034,44 @@ pub(crate) async fn apply_ls_colors(
         let _ = channel.data(cmd.as_bytes()).await;
     }
 }
+#[tauri::command]
+pub fn ssh_keygen(
+    path: String,
+    passphrase: Option<String>,
+    comment: Option<String>,
+) -> Result<String, String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let expanded = path.trim().replace("~", &home);
+    if expanded.is_empty() {
+        return Err("Anahtar yolu boş olamaz".to_string());
+    }
+    let dir = std::path::Path::new(&expanded)
+        .parent()
+        .unwrap_or(std::path::Path::new("."));
+    std::fs::create_dir_all(dir).map_err(|e| format!("Klasör oluşturulamadı: {e}"))?;
+
+    let mut cmd = std::process::Command::new("ssh-keygen");
+    cmd.arg("-t").arg("ed25519").arg("-f").arg(&expanded);
+    match passphrase.as_deref() {
+        Some(p) if !p.is_empty() => {
+            cmd.arg("-N").arg(p);
+        }
+        _ => {
+            cmd.arg("-N").arg("");
+        }
+    }
+    if let Some(c) = comment.as_deref() {
+        let c = c.trim();
+        if !c.is_empty() {
+            cmd.arg("-C").arg(c);
+        }
+    }
+    let out = cmd.output().map_err(|e| format!("ssh-keygen çalıştırılamadı: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "Anahtar oluşturulamadı: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(expanded)
+}

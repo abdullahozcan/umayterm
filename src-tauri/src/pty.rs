@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -59,7 +59,7 @@ fn write_zshrc(zdotdir: &Path, theme: &PtyTheme) -> std::io::Result<()> {
     let safe_symbol = sanitize_shell_arg(&theme.prompt_symbol);
     let safe_dir = sanitize_shell_arg(&theme.prompt_dir);
     let content = format!(
-        "[ -r \"$HOME/.zshrc\" ] && source \"$HOME/.zshrc\"\nstty erase '^?'\nPROMPT='%F{{{user}}}%n%F{{{symbol}}}@%F{{{user}}}%m%f %F{{{dir}}}%~%f %F{{{symbol}}}❯%f '\n",
+        "[ -r \"$HOME/.zshrc\" ] && source \"$HOME/.zshrc\"\nstty erase '^?'\nPROMPT='%F{{{user}}}%n%F{{{symbol}}}@%F{{{user}}}%m%f %F{{{dir}}}%~%f %F{{{symbol}}}❯%f '\nautoload -Uz add-zsh-hook\n_ut_cmd_start() {{ print -n \"\\e]9;9;${{PWD}}\\e\\\\\" }}\n_ut_cmd_end() {{ print -n \"\\e]9;0;${{PWD}}\\e\\\\\" }}\n_ut_cwd() {{ print -Pn \"\\e]7;file://${{PWD}}\\e\\\\\" }}\nadd-zsh-hook preexec _ut_cmd_start\nadd-zsh-hook precmd _ut_cmd_end\nadd-zsh-hook precmd _ut_cwd\n_ut_cwd\n",
         user = safe_user,
         symbol = safe_symbol,
         dir = safe_dir,
@@ -78,6 +78,8 @@ pub struct PtySession {
 pub struct PtyManager {
     sessions: Mutex<HashMap<u32, Arc<PtySession>>>,
     theme: Mutex<Option<PtyTheme>>,
+    logs: Arc<Mutex<HashMap<u32, PathBuf>>>,
+    cpu_last: Mutex<HashMap<u32, (u64, u64)>>,
 }
 
 impl PtyManager {
@@ -89,6 +91,79 @@ impl PtyManager {
 #[derive(Serialize, Clone)]
 pub struct PtyExit {
     pub id: u32,
+}
+
+#[derive(Serialize, Clone)]
+pub struct PtyCwd {
+    pub id: u32,
+    pub cwd: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct PtyCmdDone {
+    pub id: u32,
+    pub seconds: u64,
+}
+
+fn process_osc(
+    buf: &mut String,
+    app: &AppHandle,
+    id: u32,
+    cmd_start: &mut Option<std::time::Instant>,
+) {
+    loop {
+        let Some(start) = buf.find("\x1b]") else {
+            break;
+        };
+        let after = &buf[start + 2..];
+        let terminator = if let Some(end) = after.find('\x07') {
+            Some((end, end + 1))
+        } else if let Some(rel) = after.find("\x1b\\") {
+            Some((rel, rel + 2))
+        } else {
+            None
+        };
+        let Some((payload_end, consume)) = terminator else {
+            if buf.len() > 4096 {
+                buf.clear();
+            }
+            break;
+        };
+        let payload = after[..payload_end].to_string();
+        handle_osc(app, id, &payload, cmd_start);
+        buf.drain(..start + 2 + consume);
+    }
+}
+
+fn handle_osc(
+    app: &AppHandle,
+    id: u32,
+    payload: &str,
+    cmd_start: &mut Option<std::time::Instant>,
+) {
+    if let Some(rest) = payload.strip_prefix("7;") {
+        if let Some(after) = rest.strip_prefix("file://") {
+            let path = after.splitn(2, '/').nth(1).unwrap_or("");
+            if !path.is_empty() {
+                let _ = app.emit(
+                    "pty-cwd",
+                    PtyCwd {
+                        id,
+                        cwd: format!("/{path}"),
+                    },
+                );
+            }
+        }
+    } else if payload.starts_with("9;9;") {
+        *cmd_start = Some(std::time::Instant::now());
+    } else if payload.starts_with("9;0;") {
+        if let Some(st) = cmd_start.take() {
+            let secs = st.elapsed().as_secs();
+            if secs >= 5 {
+                let _ = app.emit("pty-cmd-done", PtyCmdDone { id, seconds: secs });
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -161,16 +236,34 @@ pub fn open_pty(
     state.sessions.lock().map_err(|_| "Oturum kilidi zehirlendi".to_string())?.insert(id, session);
 
     let app2 = app.clone();
+    let logs = state.logs.clone();
     std::thread::spawn(move || {
+        use std::io::Write;
+        let mut esc_buf = String::new();
+        let mut cmd_start: Option<std::time::Instant> = None;
         let mut buf = [0u8; 16384];
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    let chunk = buf[..n].to_vec();
                     if let Ok(mut q) = out.lock() {
-                        q.push_back(buf[..n].to_vec());
+                        q.push_back(chunk.clone());
                         while q.len() > MAX_BUFFER_CHUNKS {
                             q.pop_front();
+                        }
+                    }
+                    esc_buf.push_str(&String::from_utf8_lossy(&chunk));
+                    process_osc(&mut esc_buf, &app2, id, &mut cmd_start);
+                    if let Ok(lm) = logs.lock() {
+                        if let Some(path) = lm.get(&id) {
+                            if let Ok(mut f) = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(path)
+                            {
+                                let _ = f.write_all(&chunk);
+                            }
                         }
                     }
                 }
@@ -180,6 +273,137 @@ pub fn open_pty(
     });
 
     Ok(())
+}
+
+#[tauri::command]
+pub fn pty_log_start(
+    app: AppHandle,
+    state: State<'_, PtyManager>,
+    id: u32,
+) -> Result<String, String> {
+    if !state
+        .sessions
+        .lock()
+        .map_err(|_| "Oturum kilidi zehirlendi".to_string())?
+        .contains_key(&id)
+    {
+        return Err("Oturum bulunamadı".to_string());
+    }
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Veri dizini alınamadı: {e}"))?
+        .join("session-logs");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Klasör oluşturulamadı: {e}"))?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = dir.join(format!("{id}-{ts}.log"));
+    let mut lm = state
+        .logs
+        .lock()
+        .map_err(|_| "Log kilidi zehirlendi".to_string())?;
+    lm.insert(id, path.clone());
+    Ok(path.display().to_string())
+}
+
+#[tauri::command]
+pub fn pty_log_stop(state: State<'_, PtyManager>, id: u32) -> Result<(), String> {
+    if let Ok(mut lm) = state.logs.lock() {
+        lm.remove(&id);
+    }
+    Ok(())
+}
+
+fn parse_meminfo(line: &str, key: &str) -> Option<u64> {
+    if line.starts_with(key) {
+        if let Some(val) = line.split_whitespace().nth(1) {
+            return val.parse().ok();
+        }
+    }
+    None
+}
+
+#[tauri::command]
+pub fn local_stats(state: State<'_, PtyManager>, id: u32) -> Result<crate::ssh::SshStats, String> {
+    if !state
+        .sessions
+        .lock()
+        .map_err(|_| "Oturum kilidi zehirlendi".to_string())?
+        .contains_key(&id)
+    {
+        return Err("Oturum bulunamadı".to_string());
+    }
+    let mut stats = crate::ssh::SshStats::default();
+
+    if let Ok(content) = std::fs::read_to_string("/proc/stat") {
+        if let Some(line) = content.lines().find(|l| l.starts_with("cpu ")) {
+            let parts: Vec<u64> = line
+                .split_whitespace()
+                .skip(1)
+                .filter_map(|p| p.parse().ok())
+                .collect();
+            if parts.len() >= 4 {
+                let idle = parts[3] + parts.get(4).copied().unwrap_or(0);
+                let total: u64 = parts.iter().sum();
+                let mut last = state.cpu_last.lock().map_err(|_| "CPU kilidi zehirlendi".to_string())?;
+                if let Some((pt, pi)) = last.get(&id).copied() {
+                    let dt = total.saturating_sub(pt);
+                    let di = idle.saturating_sub(pi);
+                    if dt > 0 {
+                        stats.cpu = Some(((dt - di) as f64 / dt as f64) * 100.0);
+                    }
+                }
+                last.insert(id, (total, idle));
+            }
+        }
+    }
+
+    let mut mem_total = 0u64;
+    let mut mem_avail = 0u64;
+    if let Ok(content) = std::fs::read_to_string("/proc/meminfo") {
+        for line in content.lines() {
+            if let Some(v) = parse_meminfo(line, "MemTotal") {
+                mem_total = v;
+            }
+            if let Some(v) = parse_meminfo(line, "MemAvailable") {
+                mem_avail = v;
+            }
+        }
+    }
+    if mem_total > 0 {
+        stats.mem_total = Some(mem_total);
+        stats.mem_used = Some(mem_total.saturating_sub(mem_avail));
+    }
+
+    if let Ok(content) = std::fs::read_to_string("/proc/loadavg") {
+        stats.load = content
+            .split_whitespace()
+            .take(3)
+            .filter_map(|p| p.parse().ok())
+            .collect();
+    }
+
+    if let Ok(out) = std::process::Command::new("df").args(["-kP"]).output() {
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines().skip(1) {
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            if cols.len() >= 6 {
+                let size = cols[1].parse::<u64>().unwrap_or(0);
+                let used = cols[2].parse::<u64>().unwrap_or(0);
+                stats.fs.push(crate::ssh::FsStat {
+                    mount: cols[5].to_string(),
+                    size,
+                    used,
+                    pct: if size > 0 { used as f64 / size as f64 * 100.0 } else { 0.0 },
+                });
+            }
+        }
+    }
+
+    stats.ok = true;
+    Ok(stats)
 }
 
 #[tauri::command]
@@ -246,6 +470,9 @@ pub fn close_pty(state: State<'_, PtyManager>, id: u32) -> Result<(), String> {
                 let _ = child.kill();
             }
         }
+    }
+    if let Ok(mut lm) = state.logs.lock() {
+        lm.remove(&id);
     }
     Ok(())
 }

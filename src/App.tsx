@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useSessionStore, applyThemeBackend } from "./store";
+import { setLang, t } from "./i18n";
 import TerminalView from "./components/TerminalView";
 import ConnectModal from "./components/ConnectModal";
 import HostKeyModal from "./components/HostKeyModal";
@@ -11,6 +12,7 @@ import PaletteModal from "./components/PaletteModal";
 import SftpPanel from "./components/SftpPanel";
 import TunnelModal from "./components/TunnelModal";
 import AiDrawer from "./components/AiDrawer";
+import OpencodePanel from "./components/OpencodePanel";
 import Sidebar from "./components/Sidebar";
 import LockScreen from "./components/LockScreen";
 import type { Session } from "./types";
@@ -120,6 +122,10 @@ function App() {
   const setSettingsOpen = useSessionStore((s) => s.setSettingsOpen);
   const renameSession = useSessionStore((s) => s.renameSession);
   const setSessionColor = useSessionStore((s) => s.setSessionColor);
+  const toggleReadOnly = useSessionStore((s) => s.toggleReadOnly);
+  const toggleLog = useSessionStore((s) => s.toggleLog);
+  const sessionLogs = useSessionStore((s) => s.sessionLogs);
+  const tabCwd = useSessionStore((s) => s.tabCwd);
   const moveSession = useSessionStore((s) => s.moveSession);
   const sftpOpen = useSessionStore((s) => s.sftpOpen);
   const setSftpOpen = useSessionStore((s) => s.setSftpOpen);
@@ -131,6 +137,10 @@ function App() {
   const setBroadcastOpen = useSessionStore((s) => s.setBroadcastOpen);
   const aiOpen = useSessionStore((s) => s.aiOpen);
   const setAiOpen = useSessionStore((s) => s.setAiOpen);
+  const opencodeOpen = useSessionStore((s) => s.opencodeOpen);
+  const setOpencodeOpen = useSessionStore((s) => s.setOpencodeOpen);
+  const accentColor = useSessionStore((s) => s.settings.accentColor);
+  const language = useSessionStore((s) => s.settings.language);
   const broadcastSend = useSessionStore((s) => s.broadcastSend);
   const deadIds = useSessionStore((s) => s.deadIds);
   const updateAvailable = useSessionStore((s) => s.updateAvailable);
@@ -201,6 +211,14 @@ function App() {
   }, []);
 
   useShortcuts();
+
+  useEffect(() => {
+    setLang(language === "en" ? "en" : "tr");
+  }, [language]);
+
+  useEffect(() => {
+    document.documentElement.style.setProperty("--accent", accentColor);
+  }, [accentColor]);
 
   const visible = sessions.filter((s) => visibleIds.includes(s.id));
   const count = visible.length;
@@ -289,7 +307,7 @@ function App() {
       <div className="main">
         <div className="tabbar">
           <button className="tab-connect" onClick={() => setConnectOpen(true)}>
-            <span className="tab-connect-icon">🔌</span> SSH Bağlan
+            <span className="tab-connect-icon">🔌</span> {t("ssh.connect")}
           </button>
           {sessions.map((s) => (
             <div
@@ -327,6 +345,11 @@ function App() {
               {s.color && (
                 <span className="tab-dot" style={{ background: s.color }} />
               )}
+              {s.readOnly && (
+                <span className="tab-dot" title={t("tab.readonly")}>
+                  🔒
+                </span>
+              )}
               {editingId === s.id ? (
                 <input
                   className="tab-edit"
@@ -343,6 +366,7 @@ function App() {
               ) : (
                 <span
                   className="tab-title"
+                  title={tabCwd[s.id] || s.title}
                   onDoubleClick={(e) => {
                     e.stopPropagation();
                     setEditingId(s.id);
@@ -350,6 +374,9 @@ function App() {
                   }}
                 >
                   {s.title}
+                  {tabCwd[s.id] && (
+                    <span className="tab-cwd">{tabCwd[s.id]}</span>
+                  )}
                 </span>
               )}
               <button
@@ -368,7 +395,7 @@ function App() {
               className="term-menu tab-menu"
               style={{ left: tabMenu.x, top: tabMenu.y }}
             >
-              <div className="term-menu-label">Sekme rengi</div>
+              <div className="term-menu-label">{t("tab.color")}</div>
               <div className="color-row">
                 {TAB_COLORS.map((c) => (
                   <button
@@ -383,7 +410,7 @@ function App() {
                 ))}
                 <button
                   className="color-swatch clear"
-                  title="Rengi kaldır"
+                  title={t("tab.clearColor")}
                   onClick={() => {
                     setSessionColor(tabMenu.id, null);
                     setTabMenu(null);
@@ -404,8 +431,32 @@ function App() {
                   setTabMenu(null);
                 }}
               >
-                Yeniden adlandır
+                {t("tab.rename")}
               </button>
+              <button
+                className="term-menu-item"
+                onClick={() => {
+                  toggleReadOnly(tabMenu.id);
+                  setTabMenu(null);
+                }}
+              >
+                {sessions.find((x) => x.id === tabMenu.id)?.readOnly
+                  ? t("tab.readonlyOff")
+                  : t("tab.readonly")}
+              </button>
+              {sessions.find((x) => x.id === tabMenu.id)?.kind === "local" && (
+                <button
+                  className="term-menu-item"
+                  onClick={() => {
+                    void toggleLog(tabMenu.id);
+                    setTabMenu(null);
+                  }}
+                >
+                  {sessionLogs[tabMenu.id]
+                    ? t("tab.logStop")
+                    : t("tab.logStart")}
+                </button>
+              )}
               <button
                 className="term-menu-item"
                 onClick={() => {
@@ -413,7 +464,7 @@ function App() {
                   setTabMenu(null);
                 }}
               >
-                Sekmeyi kopyala
+                {t("tab.duplicate")}
               </button>
               <button
                 className="term-menu-item"
@@ -422,7 +473,7 @@ function App() {
                   setTabMenu(null);
                 }}
               >
-                Sekmeyi kapat
+                {t("tab.close")}
               </button>
             </div>
           )}
@@ -436,7 +487,7 @@ function App() {
                 openLocal();
               }
             }}
-            title="Yeni yerel sekme (Shift+tık: dizin seç)"
+            title={t("tab.new")}
           >
             +
           </button>
@@ -444,14 +495,14 @@ function App() {
           <button
             className="tab-split"
             onClick={() => splitSession("row")}
-            title="Yan yana böl (yeni terminal)"
+            title={t("split.h")}
           >
             ⇄
           </button>
           <button
             className="tab-split"
             onClick={() => splitSession("column")}
-            title="Alt alta böl (yeni terminal)"
+            title={t("split.v")}
           >
             ⇅
           </button>
@@ -463,21 +514,21 @@ function App() {
                 setSftpOpen(!sftpOpen, active.id);
               }
             }}
-            title="SFTP paneli"
+            title={t("split.sftp")}
           >
             📁
           </button>
           <button
             className="tab-split"
             onClick={() => setTunnelsOpen(true)}
-            title="Port yönlendirme / tünel"
+            title={t("split.tunnel")}
           >
             🔀
           </button>
           <button
             className="tab-split"
             onClick={() => setBroadcastOpen(!broadcastOpen)}
-            title="Tüm sekmelere komut gönder (broadcast)"
+            title={t("split.broadcast")}
           >
             📢
           </button>
@@ -485,35 +536,42 @@ function App() {
             className="tab-split"
             onClick={() => setLocked(true)}
             disabled={!lockEnabled}
-            title="Uygulamayı kilitle"
+            title={t("split.lock")}
           >
             🔒
           </button>
           <button
             className="tab-split"
             onClick={() => setSettingsOpen(true)}
-            title="Ayarlar"
+            title={t("split.settings")}
           >
             ⚙
           </button>
           <button
             className={`tab-split ${aiOpen ? "tab-split-active" : ""}`}
             onClick={() => setAiOpen(!aiOpen)}
-            title="AI Asistan (OpenRouter)"
+            title={t("split.ai")}
           >
             ✨
+          </button>
+          <button
+            className={`tab-split ${opencodeOpen ? "tab-split-active" : ""}`}
+            onClick={() => setOpencodeOpen(!opencodeOpen)}
+            title={t("split.opencode")}
+          >
+            🧠
           </button>
         </div>
         {updateAvailable && (
           <div className="update-banner">
             <span className="update-banner-text">
-              🆕 Yeni sürüm v{updateAvailable.version} mevcut
+              🆕 {t("update.banner", { version: updateAvailable.version })}
             </span>
             <button
               className="btn-primary"
               onClick={() => void downloadAndInstall()}
             >
-              İndir ve kur
+              {t("update.install")}
             </button>
             <button
               className="broadcast-close"
@@ -528,8 +586,8 @@ function App() {
           <div className="broadcast-bar">
             <span className="broadcast-label">
               📢{" "}
-              {sessions.filter((s) => !deadIds.includes(s.id)).length} sekmeye
-              gönderiliyor
+              {sessions.filter((s) => !deadIds.includes(s.id)).length}{" "}
+              {t("broadcast.to")}
             </span>
             <input
               className="broadcast-input"
@@ -545,7 +603,7 @@ function App() {
                   setBroadcastOpen(false);
                 }
               }}
-              placeholder="Komut yazın, Enter tüm sekmelere gönderir (Esc: kapat)"
+              placeholder={t("broadcast.placeholder")}
             />
             <button
               className="broadcast-close"
@@ -563,7 +621,7 @@ function App() {
           }}
         >
           {count === 0 && sessions.length === 0 ? (
-            <div className="empty-state">Yeni bir sekme açın veya SSH bağlantısı kurun</div>
+            <div className="empty-state">{t("empty.state")}</div>
           ) : (
             sessions.map((s) => {
               const visIndex = visibleIds.indexOf(s.id);
@@ -611,24 +669,24 @@ function App() {
       {sftpOpen && <SftpPanel />}
       <TunnelModal />
       <AiDrawer />
+      <OpencodePanel />
       {pendingCloseId != null && (
         <div
           className="modal-backdrop"
           onMouseDown={(e) => e.stopPropagation()}
         >
           <div className="modal modal-small" onMouseDown={(e) => e.stopPropagation()}>
-            <h2>Sekmeyi kapat</h2>
+            <h2>{t("tab.close")}</h2>
             <p>
               <strong>{sessions.find((s) => s.id === pendingCloseId)?.title}</strong>{" "}
-              sekmesinde hâlâ çalışan bir işlem var. Kapatmak istediğinize emin
-              misiniz? İşlem sonlandırılacaktır.
+              {t("app.exitConfirm")}
             </p>
             <div className="modal-actions">
               <button className="btn" onClick={cancelClose}>
-                İptal
+                {t("delete.cancel")}
               </button>
               <button className="btn btn-danger" onClick={confirmClose}>
-                Kapat
+                {t("tab.close")}
               </button>
             </div>
           </div>

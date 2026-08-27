@@ -7,6 +7,7 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useSessionStore } from "../store";
+import { t } from "../i18n";
 import { THEMES, toXtermTheme } from "../themes";
 import SysStatsPanel from "./SysStatsPanel";
 import type {
@@ -33,6 +34,8 @@ export default function TerminalView({
   const searchRef = useRef<SearchAddon | null>(null);
   const activeRef = useRef(active);
   activeRef.current = active;
+  const readOnlyRef = useRef(!!session.readOnly);
+  readOnlyRef.current = !!session.readOnly;
   const connecting = useSessionStore((s) => s.connectingIds.includes(session.id));
   const dead = useSessionStore((s) => s.deadIds.includes(session.id));
   const reconnect = useSessionStore((s) => s.reconnect);
@@ -83,6 +86,7 @@ export default function TerminalView({
 
     const encoder = new TextEncoder();
     const writeInput = (data: string) => {
+      if (readOnlyRef.current) return;
       const bytes = Array.from(encoder.encode(data));
       if (isSsh) {
         invoke("ssh_write", { id: session.id, data: bytes }).catch(() => {});
@@ -169,7 +173,7 @@ export default function TerminalView({
         listen<SshExitPayload>("ssh-exit", (event) => {
           if (event.payload.id === session.id) {
             term.write(
-              `\r\n\x1b[31m[oturum kapandı, çıkış kodu: ${event.payload.code}]\x1b[0m\r\n`,
+              `\r\n\x1b[31m${t("term.closed", { code: event.payload.code })}\x1b[0m\r\n`,
             );
           }
         }),
@@ -177,14 +181,14 @@ export default function TerminalView({
       subs.push(
         listen<SshErrorPayload>("ssh-error", (event) => {
           if (event.payload.id === session.id) {
-            term.write(`\r\n\x1b[31m[${event.payload.message}]\x1b[0m\r\n`);
+            term.write(`\r\n\x1b[31m${t("term.error", { message: event.payload.message })}\x1b[0m\r\n`);
           }
         }),
       );
       subs.push(
         listen<SshClosePayload>("ssh-close", (event) => {
           if (event.payload.id === session.id) {
-            term.write("\r\n\x1b[33m[bağlantı kapatıldı]\x1b[0m\r\n");
+            term.write(`\r\n\x1b[33m${t("term.disconnected")}\x1b[0m\r\n`);
           }
         }),
       );
@@ -197,12 +201,12 @@ export default function TerminalView({
       })
         .then(() => {})
         .catch((e) => {
-          term.write(`\r\n\x1b[31m[zsh başlatılamadı: ${e}]\x1b[0m\r\n`);
+          term.write(`\r\n\x1b[31m${t("term.zshFailed", { error: e })}\x1b[0m\r\n`);
         });
       subs.push(
         listen<PtyExitPayload>("pty-exit", (event) => {
           if (event.payload.id === session.id) {
-            term.write("\r\n\x1b[31m[oturum sonlandı]\x1b[0m\r\n");
+            term.write(`\r\n\x1b[31m${t("term.ended")}\x1b[0m\r\n`);
           }
         }),
       );
@@ -305,7 +309,7 @@ export default function TerminalView({
   }, [active, session.id, session.kind]);
 
   useEffect(() => {
-    if (session.kind !== "ssh" || !statsOpen) return;
+    if (!statsOpen) return;
     const id = session.id;
     let stopped = false;
     let timer: ReturnType<typeof setInterval> | null = null;
@@ -322,7 +326,8 @@ export default function TerminalView({
         return;
       }
       try {
-        const data = await invoke<SshStats>("ssh_stats", { id });
+        const cmd = session.kind === "ssh" ? "ssh_stats" : "local_stats";
+        const data = await invoke<SshStats>(cmd, { id });
         if (!stopped) {
           useSessionStore.getState().setStats(id, data);
         }
@@ -383,6 +388,18 @@ export default function TerminalView({
     setMenu(null);
   };
 
+  const doAiSend = () => {
+    const t = termRef.current?.getSelection();
+    setMenu(null);
+    if (t) {
+      useSessionStore
+        .getState()
+        .aiAsk(
+          `Bu terminal çıktısını/hatayı açıkla ve çözüm öner (komut örnekleriyle):\n\n${t}`,
+        );
+    }
+  };
+
   const doPaste = () => {
     setMenu(null);
     void navigator.clipboard.readText().then((txt) => {
@@ -403,7 +420,7 @@ export default function TerminalView({
 
   return (
     <div className="terminal-wrap" onContextMenu={onContextMenu}>
-      {session.kind === "ssh" && <SysStatsPanel sessionId={session.id} />}
+      <SysStatsPanel sessionId={session.id} />
       <div ref={containerRef} className="terminal-container" />
       {menu && (
         <div className="term-menu" style={{ left: menu.x, top: menu.y }}>
@@ -412,13 +429,20 @@ export default function TerminalView({
             disabled={!termRef.current?.hasSelection()}
             onClick={doCopy}
           >
-            Kopyala
+            {t("term.copy")}
           </button>
           <button className="term-menu-item" onClick={doPaste}>
-            Yapıştır
+            {t("term.paste")}
           </button>
           <button className="term-menu-item" onClick={doSelectAll}>
-            Tümünü seç
+            {t("term.selectAll")}
+          </button>
+          <button
+            className="term-menu-item"
+            disabled={!termRef.current?.hasSelection()}
+            onClick={doAiSend}
+          >
+            {t("term.aiSend")}
           </button>
           {dead && session.kind === "ssh" && (
             <>
@@ -430,7 +454,7 @@ export default function TerminalView({
                   reconnect(session.id);
                 }}
               >
-                ⟳ Yeniden Bağlan
+                {t("term.reconnect")}
               </button>
             </>
           )}
@@ -442,15 +466,14 @@ export default function TerminalView({
           onMouseDown={(e) => e.stopPropagation()}
         >
           <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
-            <h2>Çok satırlı yapıştırma onayı</h2>
+            <h2>{t("term.pasteTitle")}</h2>
             <p className="hostkey-text">
-              Yapıştırılacak metin birden fazla satır içeriyor. Göndermeden önce
-              komutu kontrol edin:
+              {t("term.pasteText")}
             </p>
             <pre className="paste-preview">{pendingPaste}</pre>
             <div className="modal-actions">
               <button className="btn" onClick={() => setPendingPaste(null)}>
-                İptal
+                {t("delete.cancel")}
               </button>
               <button
                 className="btn primary"
@@ -459,7 +482,7 @@ export default function TerminalView({
                   setPendingPaste(null);
                 }}
               >
-                Gönder
+                {t("term.pasteSend")}
               </button>
             </div>
           </div>
@@ -470,7 +493,7 @@ export default function TerminalView({
           <input
             ref={searchInputRef}
             value={searchQuery}
-            placeholder="Ara (Enter: sonraki, Shift+Enter: önceki, Esc: kapat)"
+            placeholder={t("term.search")}
             onChange={(e) => {
               setSearchQuery(e.target.value);
               searchRef.current?.findNext(e.target.value, { incremental: true });
@@ -495,13 +518,13 @@ export default function TerminalView({
         <div className="connecting-overlay">
           <div className="spinner" />
           <div className="connecting-text">
-            Bağlanılıyor: {session.title}…
+            {t("term.connecting", { title: session.title })}…
           </div>
         </div>
       )}
       {dead && !connecting && session.kind === "ssh" && (
         <button className="reconnect-btn" onClick={() => reconnect(session.id)}>
-          ⟳ Yeniden Bağlan
+          {t("term.reconnect")}
         </button>
       )}
     </div>

@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useSessionStore } from "../store";
+import { t } from "../i18n";
 import type { HostRecord, SshAuth } from "../types";
 
 export default function ConnectModal() {
@@ -26,7 +28,29 @@ export default function ConnectModal() {
   const [jumpPort, setJumpPort] = useState("22");
   const [jumpUser, setJumpUser] = useState("");
   const [jumpPassword, setJumpPassword] = useState("");
+  const [startupCommand, setStartupCommand] = useState("");
   const [error, setError] = useState("");
+  const [keygenOpen, setKeygenOpen] = useState(false);
+  const [keygenPath, setKeygenPath] = useState("~/.ssh/id_ed25519");
+  const [keygenPass, setKeygenPass] = useState("");
+  const [keygenMsg, setKeygenMsg] = useState("");
+  const [keygenErr, setKeygenErr] = useState("");
+
+  const generateKey = async () => {
+    setKeygenMsg("");
+    setKeygenErr("");
+    try {
+      const p = await invoke<string>("ssh_keygen", {
+        path: keygenPath,
+        passphrase: keygenPass || null,
+        comment: null,
+      });
+      setKeyPath(p);
+      setKeygenMsg(`Anahtar oluşturuldu: ${p}`);
+    } catch (e) {
+      setKeygenErr(String(e instanceof Error ? e.message : e));
+    }
+  };
 
   useEffect(() => {
     if (editingHost) {
@@ -48,6 +72,7 @@ export default function ConnectModal() {
       setJumpPort(String(editingHost.jumpPort ?? 22));
       setJumpUser(editingHost.jumpUser ?? "");
       setJumpPassword(editingHost.jumpPassword ?? "");
+      setStartupCommand(editingHost.startupCommand ?? "");
     } else if (connectOpen) {
       setHost("");
       setPort("22");
@@ -65,6 +90,7 @@ export default function ConnectModal() {
       setJumpPort("22");
       setJumpUser("");
       setJumpPassword("");
+      setStartupCommand("");
       setError("");
     }
   }, [editingHost, connectOpen]);
@@ -79,7 +105,7 @@ export default function ConnectModal() {
   function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!host.trim() || !username.trim()) {
-      setError("Adres ve kullanıcı adı zorunludur");
+      setError(t("connect.required"));
       return;
     }
     let auth: SshAuth;
@@ -87,7 +113,7 @@ export default function ConnectModal() {
       auth = { method: "password", password };
     } else if (authMethod === "key") {
       if (!keyPath.trim()) {
-        setError("Anahtar dosyası yolu gerekli");
+        setError(t("connect.keyRequired"));
         return;
       }
       auth = {
@@ -116,6 +142,7 @@ export default function ConnectModal() {
         jumpPort: jumpEnabled ? parseInt(jumpPort, 10) || 22 : null,
         jumpUser: jumpEnabled ? jumpUser.trim() : null,
         jumpPassword: jumpEnabled ? jumpPassword : null,
+        startupCommand: startupCommand.trim() || null,
       };
       void saveHost(updated);
       close();
@@ -139,6 +166,7 @@ export default function ConnectModal() {
         jumpPort: jumpEnabled ? parseInt(jumpPort, 10) || 22 : null,
         jumpUser: jumpEnabled ? jumpUser.trim() : null,
         jumpPassword: jumpEnabled ? jumpPassword : null,
+        startupCommand: startupCommand.trim() || null,
       };
       void saveHost(record);
     }
@@ -156,6 +184,7 @@ export default function ConnectModal() {
             auth: { method: "password", password: jumpPassword },
           }
         : null,
+      startupCommand: startupCommand.trim() || null,
     });
     close();
   }
@@ -163,24 +192,24 @@ export default function ConnectModal() {
   return (
     <div className="modal-backdrop" onClick={close}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h2>{editingHost ? "Host Düzenle" : "SSH Bağlantısı"}</h2>
+        <h2>{editingHost ? t("connect.editTitle") : t("connect.title")}</h2>
         <form onSubmit={submit}>
           <label>
-            Adres
+            {t("connect.host")}
             <input
               value={host}
               onChange={(e) => setHost(e.target.value)}
-              placeholder="ör. 192.168.1.10 veya sunucu.com"
+              placeholder={t("connect.hostPh")}
               autoFocus
             />
           </label>
           <div className="row2">
             <label>
-              Port
+              {t("connect.port")}
               <input value={port} onChange={(e) => setPort(e.target.value)} placeholder="22" />
             </label>
             <label>
-              Kullanıcı
+              {t("connect.user")}
               <input
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
@@ -189,32 +218,32 @@ export default function ConnectModal() {
             </label>
           </div>
           <label>
-            Kimlik doğrulama
+            {t("connect.auth")}
             <select
               value={authMethod}
               onChange={(e) => setAuthMethod(e.target.value as typeof authMethod)}
             >
-              <option value="password">Parola</option>
-              <option value="key">Anahtar dosyası</option>
-              <option value="agent">ssh-agent</option>
+              <option value="password">{t("connect.auth.password")}</option>
+              <option value="key">{t("connect.auth.key")}</option>
+              <option value="agent">{t("connect.auth.agent")}</option>
             </select>
           </label>
           {authMethod === "password" && (
             <label>
-              Parola
+              {t("connect.password")}
               <input
                 type="password"
                 autoComplete="new-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder={editingHost ? "Boş bırakılırsa değişmez" : "••••••••"}
+                placeholder={editingHost ? t("connect.passwordPh") : "••••••••"}
               />
             </label>
           )}
           {authMethod === "key" && (
             <>
               <label>
-                Anahtar dosyası
+                {t("connect.keyPath")}
                 <input
                   value={keyPath}
                   onChange={(e) => setKeyPath(e.target.value)}
@@ -222,7 +251,7 @@ export default function ConnectModal() {
                 />
               </label>
               <label>
-                Parola (boş olabilir)
+                {t("connect.keyPass")}
                 <input
                   type="password"
                   autoComplete="new-password"
@@ -231,6 +260,53 @@ export default function ConnectModal() {
                   placeholder="••••••••"
                 />
               </label>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setKeygenOpen(!keygenOpen)}
+              >
+                {t("connect.genKey")}
+              </button>
+              {keygenOpen && (
+                <div className="keygen-box">
+                  <label>
+                    {t("connect.genKeyPath")}
+                    <input
+                      value={keygenPath}
+                      onChange={(e) => setKeygenPath(e.target.value)}
+                      placeholder="~/.ssh/id_ed25519"
+                    />
+                  </label>
+                  <label>
+                    {t("connect.genKeyPass")}
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      value={keygenPass}
+                      onChange={(e) => setKeygenPass(e.target.value)}
+                      placeholder="••••••••"
+                    />
+                  </label>
+                  <div className="row2">
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      onClick={() => void generateKey()}
+                    >
+                      {t("connect.generate")}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      onClick={() => setKeygenOpen(false)}
+                    >
+                      {t("settings.cancel")}
+                    </button>
+                  </div>
+                  {keygenMsg && <p className="settings-ok">{keygenMsg}</p>}
+                  {keygenErr && <p className="form-error">{keygenErr}</p>}
+                </div>
+              )}
             </>
           )}
           {error && <div className="form-error">{error}</div>}
@@ -241,13 +317,13 @@ export default function ConnectModal() {
                 checked={jumpEnabled}
                 onChange={(e) => setJumpEnabled(e.target.checked)}
               />
-              Jump host üzerinden bağlan (ProxyJump)
+              {t("connect.jump")}
             </label>
             {jumpEnabled && (
               <>
                 <div className="row2">
                   <label>
-                    Jump adresi
+                    {t("connect.jumpHost")}
                     <input
                       value={jumpHost}
                       onChange={(e) => setJumpHost(e.target.value)}
@@ -255,7 +331,7 @@ export default function ConnectModal() {
                     />
                   </label>
                   <label>
-                    Jump port
+                    {t("connect.jumpPort")}
                     <input
                       value={jumpPort}
                       onChange={(e) => setJumpPort(e.target.value)}
@@ -265,7 +341,7 @@ export default function ConnectModal() {
                 </div>
                 <div className="row2">
                   <label>
-                    Jump kullanıcı
+                    {t("connect.jumpUser")}
                     <input
                       value={jumpUser}
                       onChange={(e) => setJumpUser(e.target.value)}
@@ -273,7 +349,7 @@ export default function ConnectModal() {
                     />
                   </label>
                   <label>
-                    Jump parola
+                    {t("connect.jumpPass")}
                     <input
                       type="password"
                       autoComplete="new-password"
@@ -292,13 +368,13 @@ export default function ConnectModal() {
                   checked={saveIt}
                   onChange={(e) => setSaveIt(e.target.checked)}
                 />
-                Host olarak kaydet
+                {t("connect.saveHost")}
               </label>
             )}
             {(saveIt || editingHost) && (
               <>
                 <label>
-                  İsim
+                  {t("connect.name")}
                   <input
                     value={name}
                     onChange={(e) => setName(e.target.value)}
@@ -306,7 +382,7 @@ export default function ConnectModal() {
                   />
                 </label>
                 <label>
-                  Grup (opsiyonel)
+                  {t("connect.group")}
                   <input
                     value={group}
                     onChange={(e) => setGroup(e.target.value)}
@@ -314,11 +390,21 @@ export default function ConnectModal() {
                   />
                 </label>
                 <label>
-                  Etiketler (virgülle ayırın)
+                  {t("connect.tags")}
                   <input
                     value={tags}
                     onChange={(e) => setTags(e.target.value)}
                     placeholder="ör. prod, web"
+                  />
+                </label>
+                <label>
+                  {t("connect.startup")}
+                  <textarea
+                    value={startupCommand}
+                    onChange={(e) => setStartupCommand(e.target.value)}
+                    placeholder={t("connect.startupPh")}
+                    rows={2}
+                    style={{ resize: "vertical" }}
                   />
                 </label>
               </>
@@ -329,7 +415,7 @@ export default function ConnectModal() {
               İptal
             </button>
             <button type="submit" className="btn primary">
-              {editingHost ? "Kaydet" : "Bağlan"}
+              {editingHost ? t("connect.save") : t("connect.submit")}
             </button>
           </div>
         </form>

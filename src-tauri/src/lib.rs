@@ -1,4 +1,5 @@
 mod ai;
+mod opencode;
 mod pty;
 mod sftp;
 mod ssh;
@@ -34,11 +35,15 @@ pub fn run() {
             ai::ai_models,
             ai::ai_chat,
             ai::ai_stop,
+            opencode::opencode_probe,
             pty::open_pty,
             pty::pty_poll,
             pty::write_to_pty,
             pty::resize_pty,
             pty::close_pty,
+            pty::pty_log_start,
+            pty::pty_log_stop,
+            pty::local_stats,
             pty::apply_theme,
             ssh::ssh_connect,
             ssh::ssh_poll,
@@ -48,6 +53,7 @@ pub fn run() {
             ssh::ssh_stats,
             ssh::ssh_accept_host_key,
             ssh::ssh_reject_host_key,
+            ssh::ssh_keygen,
             store::host_list,
             store::host_list_safe,
             store::host_get_secrets,
@@ -55,10 +61,13 @@ pub fn run() {
             store::host_delete,
             store::hosts_export,
             store::hosts_import,
+            store::hosts_export_ssh_config,
             store::ssh_config_import,
             store::snippet_list,
             store::snippet_save,
             store::snippet_delete,
+            store::snippets_export,
+            store::snippets_import,
             store::settings_get_all,
             store::settings_set,
             store::lock_status,

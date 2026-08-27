@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSessionStore } from "../store";
 import { DEV_COMMANDS } from "../devCommands";
+import { t } from "../i18n";
 
 interface PaletteItem {
   key: string;
@@ -31,8 +32,8 @@ export default function PaletteModal() {
     if (match("SSH Bağlan", "yeni bağlantı")) {
       out.push({
         key: "action-connect",
-        group: "Eylemler",
-        title: "SSH Bağlan",
+        group: t("palette.group.actions"),
+        title: t("palette.newSsh"),
         icon: "🔌",
         run: () => st.setConnectOpen(true),
       });
@@ -40,8 +41,8 @@ export default function PaletteModal() {
     if (match("Yeni yerel sekme", "zsh")) {
       out.push({
         key: "action-local",
-        group: "Eylemler",
-        title: "Yeni yerel sekme",
+        group: t("palette.group.actions"),
+        title: t("palette.newTab"),
         icon: "▣",
         run: () => st.openLocal(),
       });
@@ -49,17 +50,32 @@ export default function PaletteModal() {
     if (match("Ayarlar")) {
       out.push({
         key: "action-settings",
-        group: "Eylemler",
-        title: "Ayarlar",
+        group: t("palette.group.actions"),
+        title: t("palette.settings"),
         icon: "⚙",
         run: () => st.setSettingsOpen(true),
       });
+    }
+    for (const s of st.sessions) {
+      if (match(s.title, s.kind === "ssh" ? s.params.host : "yerel zsh")) {
+        out.push({
+          key: `tab-${s.id}`,
+          group: t("palette.group.tabs"),
+          title: s.title,
+          subtitle:
+            s.kind === "ssh"
+              ? `${s.params.username}@${s.params.host}:${s.params.port}`
+              : t("palette.newTabSub"),
+          icon: s.kind === "ssh" ? "🖥" : "▣",
+          run: () => st.activate(s.id),
+        });
+      }
     }
     for (const h of st.hosts) {
       if (match(h.name, `${h.host} ${h.username}`)) {
         out.push({
           key: `host-${h.id}`,
-          group: "Hostlar",
+          group: t("palette.group.hosts"),
           title: h.name,
           subtitle: `${h.username}@${h.host}:${h.port}`,
           icon: "🖥",
@@ -71,7 +87,7 @@ export default function PaletteModal() {
       if (match(sn.name, sn.command)) {
         out.push({
           key: `snip-${sn.id}`,
-          group: "Snippetler",
+          group: t("palette.group.snippets"),
           title: sn.name,
           subtitle: sn.command,
           icon: "⚡",
@@ -83,7 +99,7 @@ export default function PaletteModal() {
       if (match(dc.title, dc.subtitle)) {
         out.push({
           key: `dev-${dc.key}`,
-          group: "Dev Kurulumları",
+          group: t("palette.group.dev"),
           title: dc.title,
           subtitle: dc.subtitle,
           icon: dc.icon,
@@ -121,7 +137,7 @@ export default function PaletteModal() {
           ref={inputRef}
           className="palette-input"
           value={q}
-          placeholder="Ara: host, snippet, komut..."
+          placeholder={t("palette.placeholder")}
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "ArrowDown") {
@@ -141,7 +157,7 @@ export default function PaletteModal() {
         />
         <div className="palette-list">
           {items.length === 0 && (
-            <div className="palette-empty">Sonuç yok</div>
+            <div className="palette-empty">{t("palette.empty")}</div>
           )}
           {items.map((item, i) => {
             const header =

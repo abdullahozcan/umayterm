@@ -140,6 +140,7 @@ export default function SftpPanel() {
         remote: entry.path,
         local: path,
         opId,
+        resume: true,
       });
       setStatus(`İndirildi: ${entry.name}`);
     } catch (e) {
@@ -148,28 +149,37 @@ export default function SftpPanel() {
   };
 
   const upload = async () => {
-    const path = await open({ multiple: false });
-    if (typeof path !== "string" || !path) return;
-    const name = path.split("/").pop() || path;
-    const joined = cwd.endsWith("/") ? `${cwd}${name}` : `${cwd}/${name}`;
-    const opId = sftpOpId++;
-    setTransfers((list) => [
-      ...list,
-      { opId, name, dir: "up", transferred: 0, total: 0, done: false, error: null },
-    ]);
-    setStatus(`Yükleniyor: ${name}...`);
-    try {
-      await invoke("sftp_upload", {
-        sessionId,
-        local: path,
-        remote: joined,
-        opId,
-      });
-      setStatus(`Yüklendi: ${name}`);
-      void load(cwd);
-    } catch (e) {
-      setStatus(String(e));
+    const picked = await open({ multiple: true });
+    const paths = Array.isArray(picked)
+      ? picked
+      : typeof picked === "string"
+        ? [picked]
+        : [];
+    if (paths.length === 0) return;
+    setStatus(`${paths.length} dosya sıraya alındı`);
+    for (const path of paths) {
+      const name = path.split("/").pop() || path;
+      const joined = cwd.endsWith("/") ? `${cwd}${name}` : `${cwd}/${name}`;
+      const opId = sftpOpId++;
+      setTransfers((list) => [
+        ...list,
+        { opId, name, dir: "up", transferred: 0, total: 0, done: false, error: null },
+      ]);
+      setStatus(`Yükleniyor: ${name}...`);
+      try {
+        await invoke("sftp_upload", {
+          sessionId,
+          local: path,
+          remote: joined,
+          opId,
+          resume: true,
+        });
+        setStatus(`Yüklendi: ${name}`);
+      } catch (e) {
+        setStatus(String(e));
+      }
     }
+    void load(cwd);
   };
 
   const mkdir = async () => {
