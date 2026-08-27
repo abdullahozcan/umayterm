@@ -13,11 +13,25 @@ const MAX_BUFFER_CHUNKS: usize = 1024;
 const KEEPALIVE_INTERVAL_SECS: u64 = 30;
 const KEEPALIVE_MAX: usize = 3;
 
+pub type ApprovalSender = std::sync::mpsc::Sender<ApprovalResult>;
+
+#[derive(Clone, Debug)]
+pub enum ApprovalResult {
+    Accept,
+    Reject,
+}
+
 #[derive(Default)]
 pub struct SshManager {
     pub sessions: Mutex<HashMap<u32, Arc<SshSession>>>,
     accepted_host_keys: Mutex<HashMap<u32, Vec<String>>>,
     cancelled: Mutex<HashSet<u32>>,
+    pub pending_approvals: Mutex<HashMap<u32, ApprovalSender>>,
+    pub main_channels: Mutex<HashMap<u32, ChannelId>>,
+    pub monitor_channels: Mutex<HashMap<u32, ChannelId>>,
+    pub monitor_out: Mutex<HashMap<u32, Arc<Mutex<VecDeque<Vec<u8>>>>>>,
+    pub cpu_last: Mutex<HashMap<u32, (u64, u64)>>,
+    pub monitor_lock: tokio::sync::Mutex<()>,
 }
 
 pub(crate) struct SshSession {
@@ -50,6 +64,27 @@ pub struct HostKeyPrompt {
     pub fingerprint: String,
     pub changed: bool,
 }
+
+#[derive(Serialize, Clone, Default)]
+pub struct FsStat {
+    pub mount: String,
+    pub size: u64,
+    pub used: u64,
+    pub pct: f64,
+}
+
+#[derive(Serialize, Clone, Default)]
+pub struct SshStats {
+    pub ok: bool,
+    pub error: Option<String>,
+    pub cpu: Option<f64>,
+    pub load: Vec<f64>,
+    pub mem_used: Option<u64>,
+    pub mem_total: Option<u64>,
+    pub fs: Vec<FsStat>,
+}
+
+const SNAPSHOT_CMD: &str = "echo '###CPU###'; grep '^cpu ' /proc/stat; echo '###MEM###'; grep -E 'MemTotal|MemAvailable|MemFree' /proc/meminfo; echo '###LOAD###'; cat /proc/loadavg; echo '###DF###'; df -kP; echo '###END###'";
 
 #[derive(Deserialize)]
 pub struct SshConnectParams {
@@ -93,14 +128,79 @@ impl SshHandler {
         let Some(mgr) = self.app.try_state::<Arc<SshManager>>() else {
             return;
         };
-        let guard = mgr.sessions.lock().ok();
-        if let Some(mut sessions) = guard {
+        if let Ok(mut sessions) = mgr.sessions.lock() {
             if sessions.remove(&self.session_id).is_some() {
                 eprintln!("[ssh] oturum temizlendi (session {})", self.session_id);
             }
         }
+        if let Ok(mut pending) = mgr.pending_approvals.lock() {
+            if pending.remove(&self.session_id).is_some() {
+                eprintln!("[ssh] bekleyen onay temizlendi (session {})", self.session_id);
+            }
+        }
+        self.clear_aux();
         if let Some(tunnels) = self.app.try_state::<Arc<crate::tunnels::TunnelManager>>() {
             crate::tunnels::close_tunnels_for_session(tunnels.inner(), self.session_id);
+        }
+    }
+
+    fn clear_aux(&self) {
+        let Some(mgr) = self.app.try_state::<Arc<SshManager>>() else {
+            return;
+        };
+        if let Ok(mut g) = mgr.main_channels.lock() {
+            g.remove(&self.session_id);
+        };
+        if let Ok(mut g) = mgr.monitor_channels.lock() {
+            g.remove(&self.session_id);
+        };
+        if let Ok(mut g) = mgr.monitor_out.lock() {
+            g.remove(&self.session_id);
+        };
+        if let Ok(mut g) = mgr.cpu_last.lock() {
+            g.remove(&self.session_id);
+        };
+    }
+
+    fn is_main_channel(&self, channel: ChannelId) -> bool {
+        let Some(mgr) = self.app.try_state::<Arc<SshManager>>() else {
+            return false;
+        };
+        let is_main = {
+            let Ok(g) = mgr.main_channels.lock() else {
+                return false;
+            };
+            g.get(&self.session_id).copied() == Some(channel)
+        };
+        is_main
+    }
+
+    fn route(&self, channel: ChannelId, data: &[u8]) {
+        let Some(mgr) = self.app.try_state::<Arc<SshManager>>() else {
+            return;
+        };
+        let is_monitor = match mgr.monitor_channels.lock() {
+            Ok(g) => g.get(&self.session_id).copied() == Some(channel),
+            Err(_) => false,
+        };
+        if is_monitor {
+            if let Ok(mut g) = mgr.monitor_out.lock() {
+                if let Some(out) = g.get(&self.session_id).cloned() {
+                    if let Ok(mut q) = out.lock() {
+                        q.push_back(data.to_vec());
+                        while q.len() > MAX_BUFFER_CHUNKS {
+                            q.pop_front();
+                        }
+                    }
+                }
+            };
+            return;
+        }
+        if let Ok(mut q) = self.out.lock() {
+            q.push_back(data.to_vec());
+            while q.len() > MAX_BUFFER_CHUNKS {
+                q.pop_front();
+            }
         }
     }
 }
@@ -114,6 +214,7 @@ impl client::Handler for SshHandler {
     ) -> Result<bool, Self::Error> {
         let fingerprint = server_public_key.fingerprint(HashAlg::Sha256).to_string();
         let mgr = self.app.state::<Arc<SshManager>>();
+
         let accepted = mgr
             .accepted_host_keys
             .lock()
@@ -122,6 +223,7 @@ impl client::Handler for SshHandler {
         if accepted.iter().any(|x| x == &fingerprint) {
             return Ok(true);
         }
+
         let stored = self.app.try_state::<crate::store::Store>().and_then(|store| {
             store
                 .conn
@@ -132,25 +234,46 @@ impl client::Handler for SshHandler {
         if stored.as_deref() == Some(fingerprint.as_str()) {
             return Ok(true);
         }
+
         let changed = stored.is_some();
         eprintln!(
             "[ssh] host anahtarı onayı bekleniyor (session {}, değişti: {changed})",
             self.session_id
         );
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        if let Ok(mut pending) = mgr.pending_approvals.lock() {
+            pending.insert(self.session_id, tx);
+        }
+
         let _ = self.app.emit(
             "ssh-host-key",
             HostKeyPrompt {
                 id: self.session_id,
-                fingerprint,
+                fingerprint: fingerprint.clone(),
                 changed,
             },
         );
-        Ok(false)
+
+        match rx.recv_timeout(Duration::from_secs(120)) {
+            Ok(ApprovalResult::Accept) => {
+                if let Ok(mut accepted) = mgr.accepted_host_keys.lock() {
+                    accepted.entry(self.session_id).or_default().push(fingerprint);
+                }
+                Ok(true)
+            }
+            Ok(ApprovalResult::Reject) | Err(_) => {
+                if let Ok(mut accepted) = mgr.accepted_host_keys.lock() {
+                    accepted.remove(&self.session_id);
+                }
+                Ok(false)
+            }
+        }
     }
 
     async fn data(
         &mut self,
-        _channel: ChannelId,
+        channel: ChannelId,
         data: &[u8],
         _session: &mut client::Session,
     ) -> Result<(), Self::Error> {
@@ -161,48 +284,52 @@ impl client::Handler for SshHandler {
                 self.session_id
             );
         }
-        if let Ok(mut q) = self.out.lock() {
-            q.push_back(data.to_vec());
-            while q.len() > MAX_BUFFER_CHUNKS {
-                q.pop_front();
-            }
-        }
+        self.route(channel, data);
         Ok(())
     }
 
     async fn extended_data(
         &mut self,
-        _channel: ChannelId,
+        channel: ChannelId,
         _ext: u32,
         data: &[u8],
         _session: &mut client::Session,
     ) -> Result<(), Self::Error> {
-        if let Ok(mut q) = self.out.lock() {
-            q.push_back(data.to_vec());
-            while q.len() > MAX_BUFFER_CHUNKS {
-                q.pop_front();
-            }
-        }
+        self.route(channel, data);
         Ok(())
     }
 
     async fn channel_close(
         &mut self,
-        _channel: ChannelId,
+        channel: ChannelId,
         _session: &mut client::Session,
     ) -> Result<(), Self::Error> {
-        eprintln!("[ssh] kanal kapandı (session {})", self.session_id);
-        let _ = self.app.emit("ssh-close", SshClose { id: self.session_id });
-        self.remove_session();
+        if self.is_main_channel(channel) {
+            eprintln!("[ssh] kanal kapandı (session {})", self.session_id);
+            let _ = self.app.emit("ssh-close", SshClose { id: self.session_id });
+            self.remove_session();
+            return Ok(());
+        }
+        // İzleme (exec) kanalı kapandı — oturumu sonlandırma.
+        if let Some(mgr) = self.app.try_state::<Arc<SshManager>>() {
+            if let Ok(mut g) = mgr.monitor_channels.lock() {
+                if g.get(&self.session_id) == Some(&channel) {
+                    g.remove(&self.session_id);
+                }
+            }
+        }
         Ok(())
     }
 
     async fn exit_status(
         &mut self,
-        _channel: ChannelId,
+        channel: ChannelId,
         exit_status: u32,
         _session: &mut client::Session,
     ) -> Result<(), Self::Error> {
+        if !self.is_main_channel(channel) {
+            return Ok(());
+        }
         let _ = self.app.emit(
             "ssh-exit",
             SshExit {
@@ -388,6 +515,12 @@ async fn connect_inner(
         .channel_open_session()
         .await
         .map_err(|e| format!("Kanal açılamadı: {e}"))?;
+    let main_id = channel.id();
+    if let Some(mgr) = app.try_state::<Arc<SshManager>>() {
+        if let Ok(mut g) = mgr.main_channels.lock() {
+            g.insert(params.session_id, main_id);
+        }
+    }
     channel
         .request_pty(true, "xterm-256color", params.cols, params.rows, 0, 0, &[])
         .await
@@ -561,6 +694,11 @@ pub async fn ssh_close(
     state: State<'_, Arc<SshManager>>,
     id: u32,
 ) -> Result<(), String> {
+    if let Ok(mut pending) = state.pending_approvals.lock() {
+        if let Some(tx) = pending.remove(&id) {
+            let _ = tx.send(ApprovalResult::Reject);
+        }
+    }
     let session = state
         .sessions
         .lock()
@@ -586,6 +724,18 @@ pub async fn ssh_close(
     if let Some(tunnels) = app.try_state::<Arc<crate::tunnels::TunnelManager>>() {
         crate::tunnels::close_tunnels_for_session(tunnels.inner(), id);
     }
+    if let Ok(mut g) = state.main_channels.lock() {
+        g.remove(&id);
+    }
+    if let Ok(mut g) = state.monitor_channels.lock() {
+        g.remove(&id);
+    }
+    if let Ok(mut g) = state.monitor_out.lock() {
+        g.remove(&id);
+    }
+    if let Ok(mut g) = state.cpu_last.lock() {
+        g.remove(&id);
+    }
     Ok(())
 }
 
@@ -598,6 +748,11 @@ pub fn ssh_accept_host_key(
     host: String,
     port: u16,
 ) {
+    if let Ok(mut pending) = state.pending_approvals.lock() {
+        if let Some(tx) = pending.remove(&session_id) {
+            let _ = tx.send(ApprovalResult::Accept);
+        }
+    }
     if let Ok(mut accepted) = state.accepted_host_keys.lock() {
         accepted.entry(session_id).or_default().push(fingerprint.clone());
     }
@@ -610,9 +765,257 @@ pub fn ssh_accept_host_key(
 
 #[tauri::command]
 pub fn ssh_reject_host_key(state: State<'_, Arc<SshManager>>, session_id: u32) {
+    if let Ok(mut pending) = state.pending_approvals.lock() {
+        if let Some(tx) = pending.remove(&session_id) {
+            let _ = tx.send(ApprovalResult::Reject);
+        }
+    }
     if let Ok(mut accepted) = state.accepted_host_keys.lock() {
         accepted.remove(&session_id);
     }
+}
+
+#[tauri::command]
+pub async fn ssh_stats(
+    state: State<'_, Arc<SshManager>>,
+    id: u32,
+) -> Result<SshStats, String> {
+    let mgr = state.inner().clone();
+    let _lock = mgr.monitor_lock.lock().await;
+
+    let session = mgr
+        .sessions
+        .lock()
+        .map_err(|_| "Oturum kayıtları kilitli".to_string())?
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| "SSH oturumu bulunamadı".to_string())?;
+
+    let mut stats = SshStats::default();
+    let result = tokio::time::timeout(
+        Duration::from_secs(6),
+        async {
+            let ch = session
+                .handle
+                .channel_open_session()
+                .await
+                .map_err(|e| format!("İzleme kanalı açılamadı: {e}"))?;
+            let ch_id = ch.id();
+            if let Ok(mut g) = mgr.monitor_channels.lock() {
+                g.insert(id, ch_id);
+            }
+            let out = Arc::new(Mutex::new(VecDeque::new()));
+            if let Ok(mut g) = mgr.monitor_out.lock() {
+                g.insert(id, out.clone());
+            }
+            ch.exec(true, SNAPSHOT_CMD)
+                .await
+                .map_err(|e| format!("İzleme komutu gönderilemedi: {e}"))?;
+            let (mut read_half, _write_half) = ch.split();
+            tokio::spawn(async move {
+                while read_half.wait().await.is_some() {}
+            });
+
+            let mut buf = Vec::new();
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(3000);
+            loop {
+                let chunk = {
+                    let mut q = out.lock().map_err(|_| "İzleme tamponu kilitli".to_string())?;
+                    q.pop_front()
+                };
+                if let Some(chunk) = chunk {
+                    buf.extend_from_slice(&chunk);
+                    if String::from_utf8_lossy(&buf).contains("###END###") {
+                        break;
+                    }
+                } else if tokio::time::Instant::now() >= deadline {
+                    break;
+                } else {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+            if let Ok(mut g) = mgr.monitor_channels.lock() {
+                g.remove(&id);
+            }
+            Ok::<_, String>(buf)
+        },
+    )
+    .await;
+
+    if let Ok(mut g) = mgr.monitor_out.lock() {
+        g.remove(&id);
+    }
+
+    let buf = match result {
+        Ok(Ok(buf)) => buf,
+        Ok(Err(e)) => {
+            stats.ok = false;
+            stats.error = Some(e);
+            return Ok(stats);
+        }
+        Err(_) => {
+            stats.ok = false;
+            stats.error = Some("İzleme zaman aşımı".to_string());
+            return Ok(stats);
+        }
+    };
+
+    parse_snapshot(&mgr, id, &buf, &mut stats);
+    Ok(stats)
+}
+
+fn parse_snapshot(mgr: &Arc<SshManager>, id: u32, buf: &[u8], stats: &mut SshStats) {
+    let text = String::from_utf8_lossy(buf);
+    let mut section = "";
+    let mut cpu_line: Option<String> = None;
+    let mut mem: HashMap<String, u64> = HashMap::new();
+    let mut load: Vec<f64> = Vec::new();
+    let mut df_lines: Vec<String> = Vec::new();
+
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.starts_with("###CPU###") {
+            section = "cpu";
+            continue;
+        }
+        if line.starts_with("###MEM###") {
+            section = "mem";
+            continue;
+        }
+        if line.starts_with("###LOAD###") {
+            section = "load";
+            continue;
+        }
+        if line.starts_with("###DF###") {
+            section = "df";
+            continue;
+        }
+        if line.starts_with("###END###") {
+            break;
+        }
+        match section {
+            "cpu" => cpu_line = Some(line.to_string()),
+            "mem" => {
+                let mut it = line.split_whitespace();
+                let key = it.next().unwrap_or("").trim_end_matches(':').to_string();
+                if let Some(val) = it.next() {
+                    if let Ok(v) = val.parse::<u64>() {
+                        mem.insert(key, v);
+                    }
+                }
+            }
+            "load" => {
+                for part in line.split_whitespace().take(3) {
+                    if let Ok(v) = part.parse::<f64>() {
+                        load.push(v);
+                    }
+                }
+            }
+            "df" => df_lines.push(line.to_string()),
+            _ => {}
+        }
+    }
+
+    stats.load = load;
+
+    if let Some(line) = cpu_line {
+        let nums: Vec<u64> = line
+            .split_whitespace()
+            .skip(1)
+            .filter_map(|x| x.parse::<u64>().ok())
+            .collect();
+        if nums.len() >= 8 {
+            let total: u64 = nums[..8].iter().sum();
+            let idle = nums[3] + nums[4];
+            let prev = mgr
+                .cpu_last
+                .lock()
+                .ok()
+                .and_then(|g| g.get(&id).copied());
+            if let Some((pt, pi)) = prev {
+                let dtotal = total.saturating_sub(pt);
+                let didle = idle.saturating_sub(pi);
+                if dtotal > 0 {
+                    stats.cpu = Some(100.0 * (1.0 - didle as f64 / dtotal as f64));
+                }
+            }
+            if let Ok(mut g) = mgr.cpu_last.lock() {
+                g.insert(id, (total, idle));
+            }
+        }
+    }
+
+    if let Some(total) = mem.get("MemTotal").copied() {
+        let available = mem.get("MemAvailable").copied();
+        let used = match available {
+            Some(a) => total.saturating_sub(a),
+            None => total.saturating_sub(mem.get("MemFree").copied().unwrap_or(0)),
+        };
+        stats.mem_total = Some(total);
+        stats.mem_used = Some(used);
+    }
+
+    let pseudo = [
+        "tmpfs",
+        "devtmpfs",
+        "proc",
+        "sysfs",
+        "cgroup",
+        "none",
+        "overlay",
+        "shm",
+        "udev",
+        "ramfs",
+        "efivarfs",
+        "fusectl",
+        "securityfs",
+        "debugfs",
+        "tracefs",
+        "configfs",
+        "pstore",
+        "bpf",
+        "mqueue",
+        "hugetlbfs",
+        "binfmt_misc",
+        "rootfs",
+    ];
+    let mut fss: Vec<FsStat> = Vec::new();
+    for line in df_lines {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 6 {
+            continue;
+        }
+        let fsname = parts[0];
+        let mount = parts[5..].join(" ");
+        if pseudo.iter().any(|p| fsname.starts_with(p)) {
+            continue;
+        }
+        if !mount.starts_with('/') {
+            continue;
+        }
+        if mount.starts_with("/proc")
+            || mount.starts_with("/sys")
+            || mount.starts_with("/dev/")
+        {
+            continue;
+        }
+        let size = parts[1].parse::<u64>().unwrap_or(0);
+        let used = parts[2].parse::<u64>().unwrap_or(0);
+        let pct = parts[4].trim_end_matches('%').parse::<f64>().unwrap_or(0.0);
+        if size == 0 {
+            continue;
+        }
+        fss.push(FsStat {
+            mount: mount.to_string(),
+            size,
+            used,
+            pct,
+        });
+    }
+    fss.sort_by(|a, b| b.size.cmp(&a.size));
+    fss.truncate(10);
+    stats.fs = fss;
+    stats.ok = true;
 }
 
 pub(crate) async fn apply_ls_colors(

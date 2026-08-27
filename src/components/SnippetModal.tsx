@@ -1,16 +1,31 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useSessionStore } from "../store";
+import type { Snippet } from "../types";
 
 export default function SnippetModal() {
   const snippetOpen = useSessionStore((s) => s.snippetOpen);
   const setSnippetOpen = useSessionStore((s) => s.setSnippetOpen);
   const saveSnippet = useSessionStore((s) => s.saveSnippet);
+  const editingSnippet = useSessionStore((s) => s.editingSnippet);
 
   const [name, setName] = useState("");
   const [command, setCommand] = useState("");
   const [error, setError] = useState("");
 
+  useEffect(() => {
+    if (editingSnippet) {
+      setName(editingSnippet.name);
+      setCommand(editingSnippet.command);
+    } else {
+      setName("");
+      setCommand("");
+    }
+    setError("");
+  }, [editingSnippet, snippetOpen]);
+
   if (!snippetOpen) return null;
+
+  const isEditing = editingSnippet !== null;
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -18,17 +33,23 @@ export default function SnippetModal() {
       setError("İsim ve komut zorunludur");
       return;
     }
-    void saveSnippet({ id: null, name: name.trim(), command: command.trim() });
+    const snippet: Snippet = {
+      id: editingSnippet?.id ?? null,
+      name: name.trim(),
+      command: command.trim(),
+    };
+    void saveSnippet(snippet);
     setSnippetOpen(false);
-    setName("");
-    setCommand("");
-    setError("");
+  }
+
+  function close() {
+    setSnippetOpen(false);
   }
 
   return (
-    <div className="modal-backdrop" onClick={() => setSnippetOpen(false)}>
+    <div className="modal-backdrop" onClick={close}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h2>Yeni Snippet</h2>
+        <h2>{isEditing ? "Snippet Düzenle" : "Yeni Snippet"}</h2>
         <form onSubmit={submit}>
           <label>
             İsim
@@ -51,11 +72,11 @@ export default function SnippetModal() {
           </label>
           {error && <div className="form-error">{error}</div>}
           <div className="modal-actions">
-            <button type="button" className="btn" onClick={() => setSnippetOpen(false)}>
+            <button type="button" className="btn" onClick={close}>
               İptal
             </button>
             <button type="submit" className="btn primary">
-              Kaydet
+              {isEditing ? "Güncelle" : "Kaydet"}
             </button>
           </div>
         </form>

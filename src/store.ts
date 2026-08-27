@@ -11,6 +11,7 @@ import type {
   Snippet,
   SshClosePayload,
   SshConnectParams,
+  SshStats,
   TunnelInfo,
 } from "./types";
 
@@ -47,6 +48,7 @@ export interface AppSettings {
   bellStyle: "none" | "sound";
   keepaliveSecs: number;
   confirmMultilinePaste: boolean;
+  aiModel: string;
 }
 
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
@@ -67,6 +69,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   bellStyle: "none",
   keepaliveSecs: 30,
   confirmMultilinePaste: true,
+  aiModel: "openrouter/auto",
 };
 
 function parseSettings(raw: Record<string, string>): AppSettings {
@@ -90,6 +93,7 @@ function parseSettings(raw: Record<string, string>): AppSettings {
     if (Number.isFinite(n) && n > 0) s.keepaliveSecs = n;
   }
   if (raw.confirmMultilinePaste === "false") s.confirmMultilinePaste = false;
+  if (raw.aiModel) s.aiModel = raw.aiModel;
   return s;
 }
 
@@ -98,10 +102,18 @@ interface SessionStore {
   activeId: number | null;
   visibleIds: number[];
   splitDir: "row" | "column";
+  hSplit: number;
+  vSplit: number;
+  pendingCloseId: number | null;
+  stats: Record<number, SshStats>;
+  statsOpen: Record<number, boolean>;
+  aiOpen: boolean;
+  aiKeySet: boolean;
   connectOpen: boolean;
   snippetOpen: boolean;
   pendingHostKey: PendingHostKey | null;
   editingHost: HostRecord | null;
+  editingSnippet: Snippet | null;
   hosts: HostRecord[];
   snippets: Snippet[];
   connectingIds: number[];
@@ -131,6 +143,9 @@ interface SessionStore {
     color?: string | null,
   ) => void;
   close: (id: number) => void;
+  requestClose: (id: number) => void;
+  confirmClose: () => void;
+  cancelClose: () => void;
   reconnect: (id: number) => void;
   markDead: (id: number) => void;
   renameSession: (id: number, title: string) => void;
@@ -157,6 +172,7 @@ interface SessionStore {
   closeTunnel: (id: number) => Promise<void>;
   setConnectOpen: (open: boolean) => void;
   setSnippetOpen: (open: boolean) => void;
+  setEditingSnippet: (snippet: Snippet | null) => void;
   startEditHost: (host: HostRecord) => void;
   clearEditHost: () => void;
   setPendingHostKey: (key: PendingHostKey | null) => void;
@@ -173,10 +189,16 @@ interface SessionStore {
   setTheme: (id: string) => void;
   splitSession: (dir: "row" | "column") => void;
   setSplitDir: (dir: "row" | "column") => void;
+  setSplit: (dir: "h" | "v", frac: number) => void;
+  setStats: (id: number, stats: SshStats) => void;
+  toggleStats: (id: number) => void;
+  setAiOpen: (open: boolean) => void;
+  setAiKeySet: (set: boolean) => void;
   loadSnippets: () => Promise<void>;
   saveSnippet: (snippet: Snippet) => Promise<void>;
   deleteSnippet: (id: number) => Promise<void>;
   runSnippet: (snippet: Snippet) => void;
+  runDevCommand: (command: string) => void;
   checkLockStatus: () => Promise<boolean>;
   setLocked: (locked: boolean) => void;
   lockSetup: (current: string | null, newPassword: string) => Promise<void>;
@@ -207,6 +229,23 @@ function loadFontSize(): number {
   }
 }
 
+function loadSplit(key: string): number {
+  try {
+    const v = parseFloat(localStorage.getItem(key) || "");
+    return Number.isFinite(v) && v > 0 && v < 1 ? v : 0.5;
+  } catch {
+    return 0.5;
+  }
+}
+
+function saveSplit(key: string, value: number) {
+  try {
+    localStorage.setItem(key, String(value));
+  } catch {
+    // yoksay
+  }
+}
+
 export function applyThemeBackend(id: string) {
   const theme = THEMES[id];
   if (!theme) return;
@@ -226,10 +265,18 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   activeId: null,
   visibleIds: [],
   splitDir: "row",
+  hSplit: loadSplit("umayterm-hsplit"),
+  vSplit: loadSplit("umayterm-vsplit"),
+  pendingCloseId: null,
+  stats: {},
+  statsOpen: {},
+  aiOpen: false,
+  aiKeySet: false,
   connectOpen: false,
   snippetOpen: false,
   pendingHostKey: null,
   editingHost: null,
+  editingSnippet: null,
   hosts: [],
   snippets: [],
   connectingIds: [],
@@ -313,15 +360,41 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         s.activeId === id
           ? (visibleIds[visibleIds.length - 1] ?? null)
           : s.activeId;
+      const stats = { ...s.stats };
+      delete stats[id];
+      const statsOpen = { ...s.statsOpen };
+      delete statsOpen[id];
       return {
         sessions,
         visibleIds,
         activeId,
         connectingIds: s.connectingIds.filter((x) => x !== id),
         deadIds: s.deadIds.filter((x) => x !== id),
+        pendingCloseId: s.pendingCloseId === id ? null : s.pendingCloseId,
+        stats,
+        statsOpen,
       };
     });
   },
+
+  requestClose: (id) => {
+    const s = get();
+    const session = s.sessions.find((x) => x.id === id);
+    if (!session) return;
+    if (s.deadIds.includes(id)) {
+      s.close(id);
+      return;
+    }
+    set({ pendingCloseId: id });
+  },
+
+  confirmClose: () => {
+    const id = get().pendingCloseId;
+    if (id == null) return;
+    get().close(id);
+  },
+
+  cancelClose: () => set({ pendingCloseId: null }),
 
   reconnect: (id) => {
     const session = get().sessions.find((s) => s.id === id);
@@ -380,9 +453,9 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         kind: x.kind,
         title: x.title,
         color: x.color ?? null,
-        host: x.params?.host ?? null,
-        port: x.params?.port ?? null,
-        username: x.params?.username ?? null,
+        host: x.kind === "ssh" ? x.params.host : null,
+        port: x.kind === "ssh" ? x.params.port : null,
+        username: x.kind === "ssh" ? x.params.username : null,
       }))
       .filter((x) => x.kind === "local" || x.host);
     await invoke("session_save", { sessions: out }).catch(() => {});
@@ -429,7 +502,8 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   loadSettings: async () => {
     const raw = await invoke<Record<string, string>>("settings_get_all").catch(() => ({}));
     const settings = parseSettings(raw);
-    set({ settings, fontSize: settings.fontSize });
+    const hasKey = await invoke<boolean>("ai_key_has").catch(() => false);
+    set({ settings, fontSize: settings.fontSize, aiKeySet: hasKey });
   },
 
   updateSetting: (key, value) => {
@@ -480,7 +554,9 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
 
   setConnectOpen: (open) => set({ connectOpen: open }),
 
-  setSnippetOpen: (open) => set({ snippetOpen: open }),
+  setSnippetOpen: (open) => set({ snippetOpen: open, editingSnippet: open ? get().editingSnippet : null }),
+
+  setEditingSnippet: (snippet) => set({ editingSnippet: snippet, snippetOpen: snippet !== null }),
 
   startEditHost: (host) => set({ editingHost: host, connectOpen: true }),
 
@@ -512,7 +588,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   },
 
   loadHosts: async () => {
-    const hosts = await invoke<HostRecord[]>("host_list").catch(() => []);
+    const hosts = await invoke<HostRecord[]>("host_list_safe").catch(() => []);
     set({ hosts });
   },
 
@@ -557,33 +633,41 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     return n;
   },
 
-  connectToHost: (host, color) => {
-    const auth = host.authMethod === "key"
+  connectToHost: async (host, color) => {
+    let secrets: HostRecord = host;
+    if (host.id) {
+      try {
+        secrets = await invoke<HostRecord>("host_get_secrets", { id: host.id });
+      } catch {
+        // fallback to host data
+      }
+    }
+    const auth = secrets.authMethod === "key"
       ? {
           method: "key" as const,
-          key_path: host.keyPath ?? "",
-          passphrase: host.passphrase ?? null,
+          key_path: secrets.keyPath ?? "",
+          passphrase: secrets.passphrase ?? null,
         }
-      : host.authMethod === "agent"
+      : secrets.authMethod === "agent"
         ? { method: "agent" as const }
         : {
             method: "password" as const,
-            password: host.password ?? "",
+            password: secrets.password ?? "",
           };
     const jump =
-      host.jumpHost && host.jumpUser
+      secrets.jumpHost && secrets.jumpUser
         ? {
-            host: host.jumpHost,
-            port: host.jumpPort ?? 22,
-            username: host.jumpUser,
-            auth: { method: "password" as const, password: host.jumpPassword ?? "" },
+            host: secrets.jumpHost,
+            port: secrets.jumpPort ?? 22,
+            username: secrets.jumpUser,
+            auth: { method: "password" as const, password: secrets.jumpPassword ?? "" },
           }
         : null;
     get().openSsh(
       {
-        host: host.host,
-        port: host.port,
-        username: host.username,
+        host: secrets.host,
+        port: secrets.port,
+        username: secrets.username,
         auth,
         jump,
       },
@@ -622,6 +706,29 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
 
   setSplitDir: (dir) => set({ splitDir: dir }),
 
+  setSplit: (dir, frac) => {
+    const clamped = Math.min(0.85, Math.max(0.15, frac));
+    if (dir === "h") {
+      saveSplit("umayterm-hsplit", clamped);
+      set({ hSplit: clamped });
+    } else {
+      saveSplit("umayterm-vsplit", clamped);
+      set({ vSplit: clamped });
+    }
+  },
+
+  setStats: (id, stats) =>
+    set((s) => ({ stats: { ...s.stats, [id]: stats } })),
+
+  toggleStats: (id) =>
+    set((s) => ({
+      statsOpen: { ...s.statsOpen, [id]: !s.statsOpen[id] },
+    })),
+
+  setAiOpen: (open) => set({ aiOpen: open }),
+
+  setAiKeySet: (value) => set({ aiKeySet: value }),
+
   loadSnippets: async () => {
     const snippets = await invoke<Snippet[]>("snippet_list").catch(() => []);
     set({ snippets });
@@ -641,6 +748,12 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     const active = get().activeId;
     if (active == null) return;
     writeSession(active, snippet.command);
+  },
+
+  runDevCommand: (command) => {
+    const active = get().activeId;
+    if (active == null) return;
+    writeSession(active, command);
   },
 
   checkLockStatus: async () => {
@@ -723,7 +836,7 @@ if (!hostKeyListener) {
   hostKeyListener = listen<HostKeyPromptPayload>("ssh-host-key", (event) => {
     const { id, fingerprint, changed } = event.payload;
     const session = useSessionStore.getState().sessions.find((s) => s.id === id);
-    if (!session?.params) return;
+    if (!session || session.kind !== "ssh") return;
     void useSessionStore.getState().setPendingHostKey({
       id,
       fingerprint,
@@ -745,6 +858,9 @@ if (!hostKeyListener) {
   });
   void listen<{ id: number }>("ssh-close", (event) => {
     useSessionStore.getState().setConnecting(false, event.payload.id);
+    useSessionStore.getState().markDead(event.payload.id);
+  });
+  void listen<{ id: number }>("pty-exit", (event) => {
     useSessionStore.getState().markDead(event.payload.id);
   });
 }

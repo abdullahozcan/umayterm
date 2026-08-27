@@ -10,6 +10,7 @@ import SettingsDrawer from "./components/SettingsDrawer";
 import PaletteModal from "./components/PaletteModal";
 import SftpPanel from "./components/SftpPanel";
 import TunnelModal from "./components/TunnelModal";
+import AiDrawer from "./components/AiDrawer";
 import Sidebar from "./components/Sidebar";
 import LockScreen from "./components/LockScreen";
 import type { Session } from "./types";
@@ -53,6 +54,11 @@ function useShortcuts() {
         else st.zoomFont(k === "=" || k === "+" ? 1 : -1);
         return;
       }
+      if (mod && k === "p" && (!typing || terminalFocused)) {
+        e.preventDefault();
+        st.setPaletteOpen(!st.paletteOpen);
+        return;
+      }
       if (!mod || typing) return;
 
       if (terminalFocused) {
@@ -69,12 +75,9 @@ function useShortcuts() {
       if (k === "t") {
         e.preventDefault();
         st.openLocal();
-      } else if (k === "p") {
-        e.preventDefault();
-        st.setPaletteOpen(!st.paletteOpen);
       } else if (k === "w") {
         e.preventDefault();
-        if (st.activeId != null) st.close(st.activeId);
+        if (st.activeId != null) st.requestClose(st.activeId);
       } else if (k === "tab") {
         e.preventDefault();
         switchTab(e.shiftKey ? -1 : 1);
@@ -102,11 +105,17 @@ function App() {
   const openLocal = useSessionStore((s) => s.openLocal);
   const activate = useSessionStore((s) => s.activate);
   const focusSession = useSessionStore((s) => s.focusSession);
-  const close = useSessionStore((s) => s.close);
+  const requestClose = useSessionStore((s) => s.requestClose);
+  const pendingCloseId = useSessionStore((s) => s.pendingCloseId);
+  const confirmClose = useSessionStore((s) => s.confirmClose);
+  const cancelClose = useSessionStore((s) => s.cancelClose);
   const duplicateTab = useSessionStore((s) => s.duplicateTab);
   const setConnectOpen = useSessionStore((s) => s.setConnectOpen);
   const connectOpen = useSessionStore((s) => s.connectOpen);
   const splitSession = useSessionStore((s) => s.splitSession);
+  const hSplit = useSessionStore((s) => s.hSplit);
+  const vSplit = useSessionStore((s) => s.vSplit);
+  const setSplit = useSessionStore((s) => s.setSplit);
   const connectingIds = useSessionStore((s) => s.connectingIds);
   const setSettingsOpen = useSessionStore((s) => s.setSettingsOpen);
   const renameSession = useSessionStore((s) => s.renameSession);
@@ -120,6 +129,8 @@ function App() {
   const setLocked = useSessionStore((s) => s.setLocked);
   const broadcastOpen = useSessionStore((s) => s.broadcastOpen);
   const setBroadcastOpen = useSessionStore((s) => s.setBroadcastOpen);
+  const aiOpen = useSessionStore((s) => s.aiOpen);
+  const setAiOpen = useSessionStore((s) => s.setAiOpen);
   const broadcastSend = useSessionStore((s) => s.broadcastSend);
   const deadIds = useSessionStore((s) => s.deadIds);
   const updateAvailable = useSessionStore((s) => s.updateAvailable);
@@ -133,12 +144,13 @@ function App() {
     null,
   );
   const [dragId, setDragId] = useState<number | null>(null);
+  const [divDrag, setDivDrag] = useState<"v" | "h" | null>(null);
 
   useEffect(() => {
     if (!tabMenu) return;
     const close = () => setTabMenu(null);
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
+    document.addEventListener("click", close);
+    return () => document.removeEventListener("click", close);
   }, [tabMenu]);
 
   const commitRename = (s: Session) => {
@@ -193,27 +205,83 @@ function App() {
   const visible = sessions.filter((s) => visibleIds.includes(s.id));
   const count = visible.length;
 
+  const DIV = "6px";
+  const a = `${vSplit}fr`;
+  const b = `${1 - vSplit}fr`;
+  const c = `${hSplit}fr`;
+  const d = `${1 - hSplit}fr`;
+
   let gridRows = "1fr";
   let gridCols = "1fr";
-  let gridAreas = '"a"';
-  const slotAreas = ["a", "b", "c", "d"];
+  let showV = false;
+  let showH = false;
+
   if (count === 2) {
     if (splitDir === "row") {
-      gridCols = "1fr 1fr";
-      gridAreas = '"a b"';
+      gridCols = `${a} ${DIV} ${b}`;
+      showV = true;
     } else {
-      gridRows = "1fr 1fr";
-      gridAreas = '"a" "b"';
+      gridRows = `${c} ${DIV} ${d}`;
+      showH = true;
     }
-  } else if (count === 3) {
-    gridRows = "1fr 1fr";
-    gridCols = "1fr 1fr";
-    gridAreas = splitDir === "row" ? '"a a" "b c"' : '"a b" "a c"';
-  } else if (count >= 4) {
-    gridRows = "1fr 1fr";
-    gridCols = "1fr 1fr";
-    gridAreas = '"a b" "c d"';
+  } else if (count === 3 || count >= 4) {
+    gridRows = `${c} ${DIV} ${d}`;
+    gridCols = `${a} ${DIV} ${b}`;
+    showV = true;
+    showH = true;
   }
+
+  const panePos = (i: number): { col: string; row: string } | null => {
+    if (i >= 4) return null;
+    if (count === 2) {
+      return splitDir === "row"
+        ? { col: "1", row: "1" }
+        : { col: "1", row: `${i === 0 ? "1" : "3"}` };
+    }
+    if (count === 3) {
+      if (i === 0) {
+        return splitDir === "row"
+          ? { col: "1 / 3", row: "1" }
+          : { col: "1", row: "1 / 3" };
+      }
+      return {
+        col: i === 1 ? "1" : "3",
+        row: i === 1 ? "3" : "3",
+      };
+    }
+    return {
+      col: i === 0 || i === 2 ? "1" : "3",
+      row: i === 0 || i === 1 ? "1" : "3",
+    };
+  };
+
+  const onDividerPointer = (axis: "v" | "h") => (e: React.PointerEvent) => {
+    e.preventDefault();
+    const area = e.currentTarget.parentElement as HTMLElement | null;
+    if (!area) return;
+    const target = e.currentTarget;
+    target.setPointerCapture(e.pointerId);
+    setDivDrag(axis);
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = axis === "v" ? "col-resize" : "row-resize";
+    const move = (ev: PointerEvent) => {
+      const rect = area.getBoundingClientRect();
+      const frac =
+        axis === "v"
+          ? (ev.clientX - rect.left) / rect.width
+          : (ev.clientY - rect.top) / rect.height;
+      setSplit(axis, frac);
+    };
+    const up = () => {
+      setDivDrag(null);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
 
   return (
     <div className="app">
@@ -288,7 +356,7 @@ function App() {
                 className="tab-close"
                 onClick={(e) => {
                   e.stopPropagation();
-                  close(s.id);
+                  requestClose(s.id);
                 }}
               >
                 ×
@@ -350,7 +418,7 @@ function App() {
               <button
                 className="term-menu-item"
                 onClick={() => {
-                  close(tabMenu.id);
+                  requestClose(tabMenu.id);
                   setTabMenu(null);
                 }}
               >
@@ -428,6 +496,13 @@ function App() {
           >
             ⚙
           </button>
+          <button
+            className={`tab-split ${aiOpen ? "tab-split-active" : ""}`}
+            onClick={() => setAiOpen(!aiOpen)}
+            title="AI Asistan (OpenRouter)"
+          >
+            ✨
+          </button>
         </div>
         {updateAvailable && (
           <div className="update-banner">
@@ -485,7 +560,6 @@ function App() {
           style={{
             gridTemplateRows: gridRows,
             gridTemplateColumns: gridCols,
-            gridTemplateAreas: gridAreas,
           }}
         >
           {count === 0 && sessions.length === 0 ? (
@@ -494,12 +568,14 @@ function App() {
             sessions.map((s) => {
               const visIndex = visibleIds.indexOf(s.id);
               const isVisible = visIndex >= 0;
+              const pos = isVisible ? panePos(visIndex) : null;
               return (
                 <div
                   key={s.id}
-                  className={`term-slot ${s.id === activeId ? "" : "inactive"}`}
+                  className={`term-slot ${s.id === activeId ? "active" : "inactive"}`}
                   style={{
-                    gridArea: isVisible ? slotAreas[visIndex] : undefined,
+                    gridColumn: pos?.col,
+                    gridRow: pos?.row,
                     display: isVisible ? undefined : "none",
                   }}
                   onClick={() => focusSession(s.id)}
@@ -508,6 +584,22 @@ function App() {
                 </div>
               );
             })
+          )}
+          {showV && (
+            <div
+              className={`pane-divider pane-divider-v ${
+                divDrag === "v" ? "dragging" : ""
+              }`}
+              onPointerDown={onDividerPointer("v")}
+            />
+          )}
+          {showH && (
+            <div
+              className={`pane-divider pane-divider-h ${
+                divDrag === "h" ? "dragging" : ""
+              }`}
+              onPointerDown={onDividerPointer("h")}
+            />
           )}
         </div>
       </div>
@@ -518,6 +610,30 @@ function App() {
       <PaletteModal />
       {sftpOpen && <SftpPanel />}
       <TunnelModal />
+      <AiDrawer />
+      {pendingCloseId != null && (
+        <div
+          className="modal-backdrop"
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <div className="modal modal-small" onMouseDown={(e) => e.stopPropagation()}>
+            <h2>Sekmeyi kapat</h2>
+            <p>
+              <strong>{sessions.find((s) => s.id === pendingCloseId)?.title}</strong>{" "}
+              sekmesinde hâlâ çalışan bir işlem var. Kapatmak istediğinize emin
+              misiniz? İşlem sonlandırılacaktır.
+            </p>
+            <div className="modal-actions">
+              <button className="btn" onClick={cancelClose}>
+                İptal
+              </button>
+              <button className="btn btn-danger" onClick={confirmClose}>
+                Kapat
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {locked && <LockScreen />}
       {toast && (
         <div className="toast">

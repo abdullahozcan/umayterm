@@ -40,12 +40,29 @@ fn zdotdir_for(app: &AppHandle, id: u32) -> Result<std::path::PathBuf, String> {
     Ok(base)
 }
 
+fn sanitize_ls_colors(input: &str) -> String {
+    input
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '=' || *c == ';' || *c == ':' || *c == '.' || *c == '_')
+        .collect()
+}
+
+fn sanitize_shell_arg(input: &str) -> String {
+    input
+        .chars()
+        .filter(|c| !matches!(c, '\'' | '"' | '`' | '$' | '\\' | '\n' | '\r' | ';'))
+        .collect()
+}
+
 fn write_zshrc(zdotdir: &Path, theme: &PtyTheme) -> std::io::Result<()> {
+    let safe_user = sanitize_shell_arg(&theme.prompt_user);
+    let safe_symbol = sanitize_shell_arg(&theme.prompt_symbol);
+    let safe_dir = sanitize_shell_arg(&theme.prompt_dir);
     let content = format!(
         "[ -r \"$HOME/.zshrc\" ] && source \"$HOME/.zshrc\"\nstty erase '^?'\nPROMPT='%F{{{user}}}%n%F{{{symbol}}}@%F{{{user}}}%m%f %F{{{dir}}}%~%f %F{{{symbol}}}❯%f '\n",
-        user = theme.prompt_user,
-        symbol = theme.prompt_symbol,
-        dir = theme.prompt_dir,
+        user = safe_user,
+        symbol = safe_symbol,
+        dir = safe_dir,
     );
     std::fs::write(zdotdir.join(".zshrc"), content)
 }
@@ -83,7 +100,7 @@ pub fn open_pty(
     rows: u16,
     cwd: Option<String>,
 ) -> Result<(), String> {
-    if state.sessions.lock().unwrap().contains_key(&session_id) {
+    if state.sessions.lock().map_err(|_| "Oturum kilidi zehirlendi".to_string())?.contains_key(&session_id) {
         return Ok(());
     }
 
@@ -141,7 +158,7 @@ pub fn open_pty(
         child: Arc::new(Mutex::new(child)),
         out: out.clone(),
     });
-    state.sessions.lock().unwrap().insert(id, session);
+    state.sessions.lock().map_err(|_| "Oturum kilidi zehirlendi".to_string())?.insert(id, session);
 
     let app2 = app.clone();
     std::thread::spawn(move || {
@@ -223,9 +240,11 @@ pub fn resize_pty(
 
 #[tauri::command]
 pub fn close_pty(state: State<'_, PtyManager>, id: u32) -> Result<(), String> {
-    if let Some(session) = state.sessions.lock().unwrap().remove(&id) {
-        if let Ok(mut child) = session.child.lock() {
-            let _ = child.kill();
+    if let Ok(mut sessions) = state.sessions.lock() {
+        if let Some(session) = sessions.remove(&id) {
+            if let Ok(mut child) = session.child.lock() {
+                let _ = child.kill();
+            }
         }
     }
     Ok(())
@@ -247,13 +266,15 @@ pub async fn apply_theme(
             .sessions
             .lock()
             .map_err(|_| "Oturumlar kilitli".to_string())?;
+        let safe_ls_colors = sanitize_ls_colors(&theme.ls_colors);
         for (id, session) in sessions.iter() {
             if let Ok(zdotdir) = zdotdir_for(&app, *id) {
                 let _ = write_zshrc(&zdotdir, &theme);
+                let safe_zshrc = sanitize_shell_arg(&zdotdir.join(".zshrc").display().to_string());
                 let cmd = format!(
                     "export LS_COLORS='{}' && source '{}'",
-                    theme.ls_colors,
-                    zdotdir.join(".zshrc").display()
+                    safe_ls_colors,
+                    safe_zshrc
                 );
                 if let Ok(mut w) = session.writer.lock() {
                     let _ = w.write_all(format!("\r{}\r", cmd).as_bytes());
@@ -268,7 +289,8 @@ pub async fn apply_theme(
         } else {
             Vec::new()
         };
-        let cmd = format!("export LS_COLORS='{}'\r", theme.ls_colors);
+        let safe_ls_colors = sanitize_ls_colors(&theme.ls_colors);
+        let cmd = format!("export LS_COLORS='{}'\r", safe_ls_colors);
         for id in ids {
             crate::ssh::apply_ls_colors(&ssh_state, id, &cmd).await;
         }

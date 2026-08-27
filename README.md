@@ -45,7 +45,7 @@ Gereksinim: `zsh` (yerel sekmeler için), Linux + X11/Wayland.
 
 | Paket | Açıklama |
 | --- | --- |
-| `.deb` | Debian/Ubuntu tabanlı dağıtımlar — `sudo apt install ./UmayTerm_0.23.0_amd64.deb` |
+| `.deb` | Debian/Ubuntu tabanlı dağıtımlar — `sudo apt install ./UmayTerm_0.24.0_amd64.deb` |
 | `.AppImage` | Taşınabilir — `chmod +x` ve çalıştır |
 
 > **Not:** Otomatik güncelleme yalnızca AppImage paketinde çalışır. Güncellemeler `https://updates.umayterm.app/update.json` adresinden alınır (dağıtımda değiştirilebilir).
@@ -80,7 +80,7 @@ npm run tauri build          # deb + AppImage
 export TAURI_SIGNING_PRIVATE_KEY=/home/opade/.tauri/umayterm.key
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=umayterm-sign-key
 npm run tauri build
-VERSION=0.23.0 NOTES="Sürüm notları" ./release/make-update-json.sh
+VERSION=0.24.0 NOTES="Sürüm notları" ./release/make-update-json.sh
 ```
 
 - İmza anahtarı üretimi: `npx tauri signer generate -w /path/to/key`; açık anahtar `tauri.conf.json > plugins.updater.pubkey` içine gömülür
@@ -134,6 +134,7 @@ src-tauri/                Rust backend (Tauri 2)
 | v0.21.0 | SFTP akışlı transfer + ilerleme çubuğu + dosya diyalogları |
 | v0.22.0 | Host düzenleme, etiketler, yerel sekme başlangıç dizini |
 | v0.23.0 | Jump host (ProxyJump), F11 tam ekran, sekmeyi kopyalama |
+| v0.24.0 | Güvenlik sertleştirme: host key race condition, shell injection, Argon2 CSPRNG, şifre sızıntısı engelleme, mutex poisoning, ssh_config genişletme, snippet düzenleme, host silme onayı |
 
 ## Lisans
 

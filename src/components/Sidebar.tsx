@@ -13,8 +13,10 @@ export default function Sidebar() {
   const startEditHost = useSessionStore((s) => s.startEditHost);
   const setConnectOpen = useSessionStore((s) => s.setConnectOpen);
   const setSnippetOpen = useSessionStore((s) => s.setSnippetOpen);
+  const setEditingSnippet = useSessionStore((s) => s.setEditingSnippet);
   const runSnippet = useSessionStore((s) => s.runSnippet);
   const [query, setQuery] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState<{ type: "host" | "snippet"; id: number; name: string } | null>(null);
 
   useEffect(() => {
     void loadHosts();
@@ -35,6 +37,16 @@ export default function Sidebar() {
     const g = h.groupName || "Genel";
     if (!groups.has(g)) groups.set(g, []);
     groups.get(g)!.push(h);
+  }
+
+  function doDelete() {
+    if (!confirmDelete) return;
+    if (confirmDelete.type === "host") {
+      void deleteHost(confirmDelete.id);
+    } else {
+      void deleteSnippet(confirmDelete.id);
+    }
+    setConfirmDelete(null);
   }
 
   return (
@@ -84,7 +96,7 @@ export default function Sidebar() {
                   )}
                 </span>
                 <button
-                  className="host-item-del"
+                  className="host-item-edit"
                   title="Düzenle"
                   onClick={(e) => {
                     e.stopPropagation();
@@ -98,7 +110,7 @@ export default function Sidebar() {
                   title="Sil"
                   onClick={(e) => {
                     e.stopPropagation();
-                    if (h.id != null) void deleteHost(h.id);
+                    if (h.id != null) setConfirmDelete({ type: "host", id: h.id, name: h.name });
                   }}
                 >
                   ×
@@ -137,11 +149,21 @@ export default function Sidebar() {
               <span className="snippet-item-name">{sn.name}</span>
               <span className="snippet-item-cmd">{sn.command}</span>
               <button
+                className="host-item-edit"
+                title="Düzenle"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setEditingSnippet(sn);
+                }}
+              >
+                ✎
+              </button>
+              <button
                 className="host-item-del"
                 title="Sil"
                 onClick={(e) => {
                   e.stopPropagation();
-                  if (sn.id != null) void deleteSnippet(sn.id);
+                  if (sn.id != null) setConfirmDelete({ type: "snippet", id: sn.id, name: sn.name });
                 }}
               >
                 ×
@@ -153,6 +175,24 @@ export default function Sidebar() {
           )}
         </div>
       </div>
+      {confirmDelete && (
+        <div className="modal-backdrop" onClick={() => setConfirmDelete(null)}>
+          <div className="modal modal-small" onClick={(e) => e.stopPropagation()}>
+            <h2>Silme Onayı</h2>
+            <p>
+              <strong>{confirmDelete.name}</strong> silinecek. Emin misiniz?
+            </p>
+            <div className="modal-actions">
+              <button className="btn" onClick={() => setConfirmDelete(null)}>
+                İptal
+              </button>
+              <button className="btn danger" onClick={doDelete}>
+                Sil
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

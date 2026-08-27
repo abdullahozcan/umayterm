@@ -8,12 +8,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useSessionStore } from "../store";
 import { THEMES, toXtermTheme } from "../themes";
+import SysStatsPanel from "./SysStatsPanel";
 import type {
   PtyExitPayload,
   Session,
   SshClosePayload,
   SshErrorPayload,
   SshExitPayload,
+  SshStats,
 } from "../types";
 import "@xterm/xterm/css/xterm.css";
 import "../styles/terminal.css";
@@ -37,6 +39,7 @@ export default function TerminalView({
   const themeId = useSessionStore((s) => s.themeId);
   const fontSize = useSessionStore((s) => s.fontSize);
   const settings = useSessionStore((s) => s.settings);
+  const statsOpen = useSessionStore((s) => !!s.statsOpen[session.id]);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -160,7 +163,7 @@ export default function TerminalView({
         .finally(() => {
           busy = false;
         });
-    }, 16);
+    }, 30);
     if (isSsh) {
       subs.push(
         listen<SshExitPayload>("ssh-exit", (event) => {
@@ -206,7 +209,6 @@ export default function TerminalView({
     }
 
     const onResize = () => {
-      if (!activeRef.current) return;
       const t = termRef.current;
       if (!t) return;
       fit.fit();
@@ -303,6 +305,48 @@ export default function TerminalView({
   }, [active, session.id, session.kind]);
 
   useEffect(() => {
+    if (session.kind !== "ssh" || !statsOpen) return;
+    const id = session.id;
+    let stopped = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const stop = () => {
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+    };
+    const poll = async () => {
+      const st = useSessionStore.getState();
+      if (st.deadIds.includes(id)) {
+        stop();
+        return;
+      }
+      try {
+        const data = await invoke<SshStats>("ssh_stats", { id });
+        if (!stopped) {
+          useSessionStore.getState().setStats(id, data);
+        }
+      } catch (e) {
+        if (!stopped) {
+          useSessionStore.getState().setStats(id, {
+            ok: false,
+            error: String(e),
+            load: [],
+            fs: [],
+          });
+        }
+        stop();
+      }
+    };
+    void poll();
+    timer = setInterval(() => void poll(), 2500);
+    return () => {
+      stopped = true;
+      stop();
+    };
+  }, [session.id, session.kind, statsOpen]);
+
+  useEffect(() => {
     const t = termRef.current;
     const theme = toXtermTheme(THEMES[themeId] ?? THEMES.onedark);
     if (t) {
@@ -320,10 +364,10 @@ export default function TerminalView({
   useEffect(() => {
     if (!menu) return;
     const close = () => setMenu(null);
-    document.addEventListener("mousedown", close);
+    document.addEventListener("click", close);
     document.addEventListener("wheel", close, { passive: true });
     return () => {
-      document.removeEventListener("mousedown", close);
+      document.removeEventListener("click", close);
       document.removeEventListener("wheel", close);
     };
   }, [menu]);
@@ -359,6 +403,7 @@ export default function TerminalView({
 
   return (
     <div className="terminal-wrap" onContextMenu={onContextMenu}>
+      {session.kind === "ssh" && <SysStatsPanel sessionId={session.id} />}
       <div ref={containerRef} className="terminal-container" />
       {menu && (
         <div className="term-menu" style={{ left: menu.x, top: menu.y }}>

@@ -7,15 +7,13 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 
-const KEYRING_SERVICE: &str = "com.opade.umayterm";
+pub(crate) const KEYRING_SERVICE: &str = "com.opade.umayterm";
 const LOCK_SALT_KEY: &str = "lockSalt";
 const LOCK_HASH_KEY: &str = "lockHash";
 
-fn hash_master_password(password: &str, salt: &str) -> Result<String, String> {
-    let salt_obj = SaltString::encode_b64(salt.as_bytes())
-        .map_err(|e| format!("Tuz kodlanamadı: {e}"))?;
+fn hash_master_password(password: &str, salt: &SaltString) -> Result<String, String> {
     Argon2::default()
-        .hash_password(password.as_bytes(), &salt_obj)
+        .hash_password(password.as_bytes(), salt)
         .map(|h| h.to_string())
         .map_err(|e| format!("Parola karma hesaplanamadı: {e}"))
 }
@@ -215,7 +213,7 @@ fn row_to_host(row: &rusqlite::Row) -> rusqlite::Result<HostRecord> {
 
 #[tauri::command]
 pub fn host_list(state: State<'_, Store>) -> Result<Vec<HostRecord>, String> {
-    let conn = state.conn.lock().unwrap();
+    let conn = state.conn.lock().map_err(|_| "Veritabanı kilidi zehirlendi".to_string())?;
     let mut stmt = conn
         .prepare(
             "SELECT id, name, host, port, username, auth_method, key_path, password,
@@ -245,8 +243,56 @@ pub fn host_list(state: State<'_, Store>) -> Result<Vec<HostRecord>, String> {
 }
 
 #[tauri::command]
+pub fn host_list_safe(state: State<'_, Store>) -> Result<Vec<HostRecord>, String> {
+    let conn = state.conn.lock().map_err(|_| "Veritabanı kilidi zehirlendi".to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, host, port, username, auth_method, key_path, password,
+                    passphrase, group_name, tags, jump_host, jump_port, jump_user,
+                    created_at, updated_at
+             FROM hosts ORDER BY group_name, name",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], row_to_host).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        let mut host = r.map_err(|e| e.to_string())?;
+        host.password = None;
+        host.passphrase = None;
+        host.jump_password = None;
+        out.push(host);
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn host_get_secrets(state: State<'_, Store>, id: i64) -> Result<HostRecord, String> {
+    let conn = state.conn.lock().map_err(|_| "Veritabanı kilidi zehirlendi".to_string())?;
+    let mut host = conn
+        .query_row(
+            "SELECT id, name, host, port, username, auth_method, key_path, password,
+                    passphrase, group_name, tags, jump_host, jump_port, jump_user,
+                    created_at, updated_at
+             FROM hosts WHERE id=?1",
+            params![id],
+            row_to_host,
+        )
+        .map_err(|e| format!("Host bulunamadı: {e}"))?;
+    if host.password.is_none() || host.password.as_deref() == Some("") {
+        host.password = secret_get(id, "password");
+    }
+    if host.passphrase.is_none() || host.passphrase.as_deref() == Some("") {
+        host.passphrase = secret_get(id, "passphrase");
+    }
+    if host.jump_user.as_deref().unwrap_or("") != "" {
+        host.jump_password = secret_get(id, "jump_password");
+    }
+    Ok(host)
+}
+
+#[tauri::command]
 pub fn host_save(state: State<'_, Store>, host: HostRecord) -> Result<i64, String> {
-    let conn = state.conn.lock().unwrap();
+    let conn = state.conn.lock().map_err(|_| "Veritabanı kilidi zehirlendi".to_string())?;
     match host.id {
         Some(id) => {
             conn.execute(
@@ -338,7 +384,7 @@ fn update_secrets(id: i64, host: &HostRecord) -> Result<(), String> {
 
 #[tauri::command]
 pub fn host_delete(state: State<'_, Store>, id: i64) -> Result<(), String> {
-    let conn = state.conn.lock().unwrap();
+    let conn = state.conn.lock().map_err(|_| "Veritabanı kilidi zehirlendi".to_string())?;
     conn.execute("DELETE FROM hosts WHERE id=?1", params![id])
         .map_err(|e| e.to_string())?;
     secret_delete(id, "password");
@@ -370,7 +416,9 @@ fn insert_host_if_new(
     mut host: HostRecord,
 ) -> bool {
     let dup = {
-        let conn = state.conn.lock().unwrap();
+        let Ok(conn) = state.conn.lock() else {
+            return false;
+        };
         conn.query_row(
             "SELECT COUNT(*) FROM hosts WHERE host=?1 AND port=?2 AND username=?3",
             params![host.host, host.port, host.username],
@@ -472,6 +520,46 @@ pub fn ssh_config_import(state: State<'_, Store>) -> Result<usize, String> {
                 h.key_path = Some(expanded);
                 h.auth_method = "key".to_string();
             }
+            "proxyjump" => {
+                let jump_value = if let Some(rest) = value.strip_prefix("~/") {
+                    format!("{home}/{rest}")
+                } else {
+                    value.to_string()
+                };
+                let jump_parts: Vec<&str> = jump_value.split('@').collect();
+                if jump_parts.len() == 2 {
+                    h.jump_user = Some(jump_parts[0].to_string());
+                    let host_port: Vec<&str> = jump_parts[1].split(':').collect();
+                    h.jump_host = Some(host_port[0].to_string());
+                    h.jump_port = host_port.get(1).and_then(|p| p.parse::<u16>().ok());
+                } else {
+                    let host_port: Vec<&str> = jump_value.split(':').collect();
+                    h.jump_host = Some(host_port[0].to_string());
+                    h.jump_port = host_port.get(1).and_then(|p| p.parse::<u16>().ok());
+                }
+            }
+            "proxycommand" => {
+                if value == "none" {
+                    continue;
+                }
+                let cmd = value.to_string();
+                if cmd.contains("ssh") && cmd.contains("-W") {
+                    if let Some(jump_host) = cmd.split("-W").nth(1) {
+                        let host_port: Vec<&str> = jump_host.trim().split(':').collect();
+                        h.jump_host = Some(host_port[0].trim().to_string());
+                        h.jump_port = host_port.get(1).and_then(|p| p.parse::<u16>().ok());
+                    }
+                }
+            }
+            "forwardagent" => {
+                if value.to_lowercase() == "yes" {
+                    h.tags = if h.tags.is_empty() {
+                        "forward-agent".to_string()
+                    } else {
+                        format!("{},forward-agent", h.tags)
+                    };
+                }
+            }
             _ => {}
         }
     }
@@ -521,7 +609,7 @@ pub fn settings_get(conn: &Connection, key: &str) -> Option<String> {
 
 #[tauri::command]
 pub fn settings_get_all(state: State<'_, Store>) -> Result<std::collections::HashMap<String, String>, String> {
-    let conn = state.conn.lock().unwrap();
+    let conn = state.conn.lock().map_err(|_| "Veritabanı kilidi zehirlendi".to_string())?;
     let mut stmt = conn
         .prepare("SELECT key, value FROM settings")
         .map_err(|e| e.to_string())?;
@@ -538,7 +626,7 @@ pub fn settings_get_all(state: State<'_, Store>) -> Result<std::collections::Has
 
 #[tauri::command]
 pub fn settings_set(state: State<'_, Store>, key: String, value: String) -> Result<(), String> {
-    let conn = state.conn.lock().unwrap();
+    let conn = state.conn.lock().map_err(|_| "Veritabanı kilidi zehirlendi".to_string())?;
     conn.execute(
         "INSERT INTO settings (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value=?2, updated_at=datetime('now')",
@@ -550,7 +638,7 @@ pub fn settings_set(state: State<'_, Store>, key: String, value: String) -> Resu
 
 #[tauri::command]
 pub fn lock_status(state: State<'_, Store>) -> Result<bool, String> {
-    let conn = state.conn.lock().unwrap();
+    let conn = state.conn.lock().map_err(|_| "Veritabanı kilidi zehirlendi".to_string())?;
     Ok(!settings_get(&conn, LOCK_HASH_KEY).unwrap_or_default().is_empty())
 }
 
@@ -560,7 +648,7 @@ pub fn lock_setup(
     current: Option<String>,
     new_password: String,
 ) -> Result<(), String> {
-    let conn = state.conn.lock().unwrap();
+    let conn = state.conn.lock().map_err(|_| "Veritabanı kilidi zehirlendi".to_string())?;
     if new_password.len() < 4 {
         return Err("Parola en az 4 karakter olmalı".to_string());
     }
@@ -571,12 +659,12 @@ pub fn lock_setup(
     } else if !settings_get(&conn, LOCK_HASH_KEY).unwrap_or_default().is_empty() {
         return Err("Parola zaten tanımlı. Değiştirmek için mevcut parolayı girin.".to_string());
     }
-    let salt = uuid_simple();
+    let salt = secure_salt();
     let hash = hash_master_password(&new_password, &salt)?;
     conn.execute(
         "INSERT INTO settings (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value=?2, updated_at=datetime('now')",
-        params![LOCK_SALT_KEY, salt],
+        params![LOCK_SALT_KEY, salt.as_str()],
     )
     .map_err(|e| e.to_string())?;
     conn.execute(
@@ -590,13 +678,13 @@ pub fn lock_setup(
 
 #[tauri::command]
 pub fn lock_verify(state: State<'_, Store>, password: String) -> Result<bool, String> {
-    let conn = state.conn.lock().unwrap();
+    let conn = state.conn.lock().map_err(|_| "Veritabanı kilidi zehirlendi".to_string())?;
     verify_master_password(&conn, &password)
 }
 
 #[tauri::command]
 pub fn lock_clear(state: State<'_, Store>, current: String) -> Result<(), String> {
-    let conn = state.conn.lock().unwrap();
+    let conn = state.conn.lock().map_err(|_| "Veritabanı kilidi zehirlendi".to_string())?;
     if !verify_master_password(&conn, &current)? {
         return Err("Mevcut parola hatalı".to_string());
     }
@@ -605,13 +693,8 @@ pub fn lock_clear(state: State<'_, Store>, current: String) -> Result<(), String
     Ok(())
 }
 
-fn uuid_simple() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{nanos:x}{:x}", std::process::id())
+fn secure_salt() -> SaltString {
+    SaltString::generate(&mut rand_core::OsRng)
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -673,7 +756,7 @@ pub struct Snippet {
 
 #[tauri::command]
 pub fn snippet_list(state: State<'_, Store>) -> Result<Vec<Snippet>, String> {
-    let conn = state.conn.lock().unwrap();
+    let conn = state.conn.lock().map_err(|_| "Veritabanı kilidi zehirlendi".to_string())?;
     let mut stmt = conn
         .prepare("SELECT id, name, command, created_at FROM snippets ORDER BY name")
         .map_err(|e| e.to_string())?;
@@ -696,7 +779,7 @@ pub fn snippet_list(state: State<'_, Store>) -> Result<Vec<Snippet>, String> {
 
 #[tauri::command]
 pub fn snippet_save(state: State<'_, Store>, snippet: Snippet) -> Result<i64, String> {
-    let conn = state.conn.lock().unwrap();
+    let conn = state.conn.lock().map_err(|_| "Veritabanı kilidi zehirlendi".to_string())?;
     match snippet.id {
         Some(id) => {
             conn.execute(
@@ -719,7 +802,7 @@ pub fn snippet_save(state: State<'_, Store>, snippet: Snippet) -> Result<i64, St
 
 #[tauri::command]
 pub fn snippet_delete(state: State<'_, Store>, id: i64) -> Result<(), String> {
-    let conn = state.conn.lock().unwrap();
+    let conn = state.conn.lock().map_err(|_| "Veritabanı kilidi zehirlendi".to_string())?;
     conn.execute("DELETE FROM snippets WHERE id=?1", params![id])
         .map_err(|e| e.to_string())?;
     Ok(())

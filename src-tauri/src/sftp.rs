@@ -28,7 +28,7 @@ pub async fn get_sftp(
     let ssh = manager
         .sessions
         .lock()
-        .unwrap()
+        .map_err(|_| "Oturum kilidi zehirlendi".to_string())?
         .get(&session_id)
         .cloned()
         .ok_or_else(|| format!("Oturum bulunamadı: {session_id}"))?;

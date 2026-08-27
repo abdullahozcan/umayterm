@@ -161,7 +161,7 @@ pub async fn tunnel_open(
     let ssh = ssh_state
         .sessions
         .lock()
-        .unwrap()
+        .map_err(|_| "Oturum kilidi zehirlendi".to_string())?
         .get(&ssh_session_id)
         .cloned()
         .ok_or_else(|| format!("SSH oturumu bulunamadı: {ssh_session_id}"))?;
@@ -194,7 +194,7 @@ pub async fn tunnel_open(
         stopped.clone(),
     ));
 
-    tunnels_state.tunnels.lock().unwrap().insert(
+    tunnels_state.tunnels.lock().map_err(|_| "Tünel kilidi zehirlendi".to_string())?.insert(
         id,
         TunnelRecord {
             info: info.clone(),
@@ -208,7 +208,9 @@ pub async fn tunnel_open(
 
 pub(crate) fn close_tunnels_for_session(tunnels: &TunnelManager, session_id: u32) {
     let to_close: Vec<u32> = {
-        let guard = tunnels.tunnels.lock().unwrap();
+        let Ok(guard) = tunnels.tunnels.lock() else {
+            return;
+        };
         guard
             .iter()
             .filter(|(_, t)| t.session_id == session_id)
@@ -216,9 +218,11 @@ pub(crate) fn close_tunnels_for_session(tunnels: &TunnelManager, session_id: u32
             .collect()
     };
     for id in to_close {
-        if let Some(record) = tunnels.tunnels.lock().unwrap().remove(&id) {
-            record.stopped.store(true, Ordering::SeqCst);
-            record.handle.abort();
+        if let Ok(mut guard) = tunnels.tunnels.lock() {
+            if let Some(record) = guard.remove(&id) {
+                record.stopped.store(true, Ordering::SeqCst);
+                record.handle.abort();
+            }
         }
     }
 }
@@ -231,7 +235,7 @@ pub async fn tunnel_close(
     let record = tunnels_state
         .tunnels
         .lock()
-        .unwrap()
+        .map_err(|_| "Tünel kilidi zehirlendi".to_string())?
         .remove(&id)
         .ok_or_else(|| format!("Tünel bulunamadı: {id}"))?;
     record.stopped.store(true, Ordering::SeqCst);
@@ -246,7 +250,7 @@ pub async fn tunnel_list(
     let mut tunnels: Vec<TunnelInfo> = tunnels_state
         .tunnels
         .lock()
-        .unwrap()
+        .map_err(|_| "Tünel kilidi zehirlendi".to_string())?
         .values()
         .map(|t| {
             let mut info = (*t.info).clone();

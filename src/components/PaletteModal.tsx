@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSessionStore } from "../store";
+import { DEV_COMMANDS } from "../devCommands";
 
 interface PaletteItem {
   key: string;
@@ -75,6 +76,18 @@ export default function PaletteModal() {
           subtitle: sn.command,
           icon: "⚡",
           run: () => st.runSnippet(sn),
+        });
+      }
+    }
+    for (const dc of DEV_COMMANDS) {
+      if (match(dc.title, dc.subtitle)) {
+        out.push({
+          key: `dev-${dc.key}`,
+          group: "Dev Kurulumları",
+          title: dc.title,
+          subtitle: dc.subtitle,
+          icon: dc.icon,
+          run: () => st.runDevCommand(dc.command),
         });
       }
     }

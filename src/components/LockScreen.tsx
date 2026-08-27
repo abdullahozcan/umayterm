@@ -34,18 +34,21 @@ export default function LockScreen() {
         <div className="lock-icon">🔒</div>
         <h2>UmayTerm kilitli</h2>
         <p>Devam etmek için uygulama parolanızı girin</p>
-        <input
-          ref={inputRef}
-          type="password"
-          autoComplete="new-password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && submit()}
-          placeholder="••••••••"
-        />
+        <div className="lock-input-wrap">
+          <span className="lock-input-icon">🔒</span>
+          <input
+            ref={inputRef}
+            type="password"
+            autoComplete="new-password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && submit()}
+            placeholder="••••••••"
+          />
+        </div>
         {error && <div className="form-error">{error}</div>}
-        <button className="btn-primary" onClick={submit} disabled={busy || !password}>
-          Kilidi aç
+        <button className="btn-primary lock-btn" onClick={submit} disabled={busy || !password}>
+          {busy ? "Doğrulanıyor…" : "Kilidi aç"}
         </button>
       </div>
     </div>
