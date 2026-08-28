@@ -421,7 +421,7 @@ export default function TerminalView({
   return (
     <div className="terminal-wrap" onContextMenu={onContextMenu}>
       <SysStatsPanel sessionId={session.id} />
-      <div ref={containerRef} className="terminal-container" />
+      <div ref={containerRef} className="terminal-container">
       {menu && (
         <div className="term-menu" style={{ left: menu.x, top: menu.y }}>
           <button
@@ -527,6 +527,7 @@ export default function TerminalView({
           {t("term.reconnect")}
         </button>
       )}
+      </div>
     </div>
   );
 }
