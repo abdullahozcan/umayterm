@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { useSessionStore } from "../store";
 import MarkdownView from "./MarkdownView";
+import ModelPickerModal from "./ModelPickerModal";
 import { t } from "../i18n";
 import type { AiEvent, AiMessage, AiModelInfo } from "../types";
 
@@ -28,6 +29,7 @@ export default function AiDrawer() {
   const [models, setModels] = useState<AiModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState("");
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState("");
@@ -202,20 +204,19 @@ export default function AiDrawer() {
           <>
             <div className="ai-bar">
               <input
-                list="ai-models"
                 className="ai-model-input"
                 value={aiModel}
                 onChange={(e) => updateSetting("aiModel", e.target.value)}
                 placeholder={t("ai.modelPlaceholder")}
                 title="Model (OpenRouter id'si)"
               />
-              <datalist id="ai-models">
-                {models.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.name ?? m.id}
-                  </option>
-                ))}
-              </datalist>
+              <button
+                className="ai-btn"
+                title="Tüm modelleri seç"
+                onClick={() => setPickerOpen(true)}
+              >
+                {t("ai.pickModel")}
+              </button>
               <button
                 className="ai-btn"
                 disabled={messages.length === 0 || busy}
@@ -290,6 +291,13 @@ export default function AiDrawer() {
           </>
         )}
       </div>
+      <ModelPickerModal
+        open={pickerOpen}
+        models={models}
+        current={aiModel}
+        onSelect={(id) => updateSetting("aiModel", id)}
+        onClose={() => setPickerOpen(false)}
+      />
     </div>
   );
 }

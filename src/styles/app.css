@@ -1181,6 +1181,23 @@ body,
   color: #64748b;
 }
 
+.model-picker-backdrop {
+  align-items: center;
+}
+
+.model-picker {
+  width: 520px;
+  margin-top: 0;
+}
+
+.model-picker-list {
+  max-height: 420px;
+}
+
+.palette-item.current {
+  background: rgba(34, 211, 238, 0.08);
+}
+
 .sftp-panel {
   position: fixed;
   top: 32px;

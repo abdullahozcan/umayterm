@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { writeClipboard } from "../clipboard";
 
 function toPlainText(children: ReactNode): string {
   if (children == null) return "";
@@ -15,14 +16,7 @@ function toPlainText(children: ReactNode): string {
 }
 
 async function copyText(text: string): Promise<boolean> {
-  try {
-    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-    // geri dönüş yoluna düş
-  }
+  if (await writeClipboard(text)) return true;
   try {
     const ta = document.createElement("textarea");
     ta.value = text;

@@ -7,6 +7,7 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useSessionStore } from "../store";
+import { readClipboard, writeClipboard } from "../clipboard";
 import { t } from "../i18n";
 import { THEMES, toXtermTheme } from "../themes";
 import SysStatsPanel from "./SysStatsPanel";
@@ -241,12 +242,12 @@ export default function TerminalView({
         if (k === "c") {
           e.preventDefault();
           const sel = term.getSelection();
-          if (sel) void navigator.clipboard.writeText(sel);
+          if (sel) void writeClipboard(sel);
           return;
         }
         if (k === "v") {
           e.preventDefault();
-          void navigator.clipboard.readText().then((txt) => {
+          void readClipboard().then((txt) => {
             if (txt && txt.includes("\n") && confirmPasteRef.current) {
               setPendingPaste(txt);
             } else {
@@ -379,7 +380,7 @@ export default function TerminalView({
 
   const doCopy = () => {
     const t = termRef.current;
-    if (t?.hasSelection()) void navigator.clipboard.writeText(t.getSelection());
+    if (t?.hasSelection()) void writeClipboard(t.getSelection());
     setMenu(null);
   };
 
@@ -402,7 +403,7 @@ export default function TerminalView({
 
   const doPaste = () => {
     setMenu(null);
-    void navigator.clipboard.readText().then((txt) => {
+    void readClipboard().then((txt) => {
       if (txt && txt.includes("\n") && settings.confirmMultilinePaste) {
         setPendingPaste(txt);
       } else {

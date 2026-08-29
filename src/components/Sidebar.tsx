@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useSessionStore } from "../store";
 import { t } from "../i18n";
+import { writeClipboard } from "../clipboard";
 import type { HostRecord } from "../types";
 
 export default function Sidebar() {
@@ -46,7 +47,7 @@ export default function Sidebar() {
 
   const copySshCommand = (h: HostRecord) => {
     const cmd = `ssh -p ${h.port} ${h.username}@${h.host}`;
-    navigator.clipboard?.writeText(cmd).catch(() => {});
+    writeClipboard(cmd);
   };
 
   const openHostMenu = (e: React.MouseEvent, h: HostRecord) => {
